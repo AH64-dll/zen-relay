@@ -1,0 +1,11 @@
+# Runtime state and secrets (generated on first run)
+zen-router/settings.json
+zen-router/settings.json.bak-*
+zen-router/lanes.json
+zen-router/burned.json
+zen-router/*.log
+
+# Build/cache artifacts
+**/target/
+**/.venv/
+**/__pycache__/

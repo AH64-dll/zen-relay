@@ -1,0 +1,17 @@
+[Unit]
+Description=Zen rotator — OpenAI-compatible relay over rotating egress IPs
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ai/.omp/zen-router/legacy-python
+Environment=PORT=8901
+Environment=SETTINGS_FILE=/home/ai/.omp/zen-router/settings.json
+Environment=LANES_FILE=/home/ai/.omp/zen-router/lanes.json
+ExecStart=/home/ai/.omp/zen-router/.venv/bin/python -c "from ip_relay import app; import uvicorn; uvicorn.run(app, host='127.0.0.1', port=8901, log_level='info')"
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
