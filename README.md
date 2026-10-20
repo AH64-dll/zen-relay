@@ -19,8 +19,6 @@ cd zen-relay
 ### قراءة مفتاح المرحّل
 
 ```bash
-python3 -c "import json;print(json.load(open('zen-router/settings.json'))['relay_api_key'])"
-# أو
 grep -o 'rly_[0-9a-f]\{32\}' zen-router/settings.json | head -1
 ```
 
@@ -74,7 +72,7 @@ PORT=8901 HOST=127.0.0.1 ./run.sh
 
 ## ملاحظات مهمة
 
-- هذا المستودع يحتوي نسخة **Rust فقط**؛ أُزيلت نسخة Python القديمة وملفاتها.
+- هذا المستودع يحتوي نسخة **Rust** فقط.
 - `zen-router/rust/` هو المصدر الكامل، و`zen-router/bin/zen-relay` هو الملف التنفيذي الجاهز.
 - تم استثناء ملفات البناء والحالة والأسرار: `target/`، `.venv/`، `.git/`، `settings.json`، `lanes.json`، `burned.json`، `.env`، والسجلات. المرحّل يولّدها عند أول تشغيل.
 - استخدم الأداة وفق شروط مزوّد الخدمة. الهدف منها توزيع الحدود المسموحة لكل IP، لا تجاوزها.
@@ -98,7 +96,7 @@ The first run creates `zen-router/settings.json` with a random relay API key, li
 Read the key:
 
 ```bash
-python3 -c "import json;print(json.load(open('zen-router/settings.json'))['relay_api_key'])"
+grep -o 'rly_[0-9a-f]\{32\}' zen-router/settings.json | head -1
 ```
 
 Use any OpenAI-compatible client with:
