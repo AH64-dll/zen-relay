@@ -1,6 +1,6 @@
 # zen-relay — Zen Relay 1.1.7
 
-مرحّل متوافق مع OpenAI API، يوزّع الطلبات على عناوين خروج متغيرة (rotating egress IPs) لتفادي حدود المعدل المفروضة لكل IP. يحتوي هذا الريبو النسخة الكاملة من مشروع **zen-router** داخل `zen-router/`، مع ملف تنفيذي جاهز لـ **Linux x86_64** لتشغيل مباشر.
+مرحّل متوافق مع OpenAI API، يوزّع الطلبات على عناوين خروج متغيرة (rotating egress IPs) لتفادي حدود المعدل المفروضة لكل IP. هذا المستودع مخصّص لنسخة **Rust** فقط: المصدر داخل `zen-router/rust/`، والملف التنفيذي الجاهز في `zen-router/bin/zen-relay`.
 
 ## التشغيل السريع (Linux x86_64)
 
@@ -74,17 +74,16 @@ PORT=8901 HOST=127.0.0.1 ./run.sh
 
 ## ملاحظات مهمة
 
-- المشروع الأصلي موجود كاملاً داخل `zen-router/` دون تعديل على ملفاته.
-- أُضيف فقط `bin/zen-relay` (نسخة مبنية) و`run.sh` (المشغّل) في هذا الريبو.
+- هذا المستودع يحتوي نسخة **Rust فقط**؛ أُزيلت نسخة Python القديمة وملفاتها.
+- `zen-router/rust/` هو المصدر الكامل، و`zen-router/bin/zen-relay` هو الملف التنفيذي الجاهز.
 - تم استثناء ملفات البناء والحالة والأسرار: `target/`، `.venv/`، `.git/`، `settings.json`، `lanes.json`، `burned.json`، `.env`، والسجلات. المرحّل يولّدها عند أول تشغيل.
-- `install.sh` و`install.ps1` القديمة تخصّ نسخة Python القديمة من المشروع؛ استخدم `./run.sh` بدلاً منهما.
 - استخدم الأداة وفق شروط مزوّد الخدمة. الهدف منها توزيع الحدود المسموحة لكل IP، لا تجاوزها.
 
 ---
 
 # English
 
-A self-contained OpenAI-compatible relay with rotating egress IPs, built from the **zen-router 1.1.7** Rust project.
+A self-contained OpenAI-compatible relay with rotating egress IPs, built from the **zen-relay 1.1.7** Rust source.
 
 ## Quick start (Linux x86_64)
 
@@ -129,7 +128,7 @@ cd ..
 
 ## Repository layout
 
-- `zen-router/` — complete upstream project, unmodified.
+- `zen-router/rust/` — Rust source (Cargo).
 - `zen-router/bin/zen-relay` — prebuilt Linux x86_64 binary (v1.1.7).
 - `run.sh` — one-command launcher (prebuilt binary or source build).
 

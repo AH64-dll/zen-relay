@@ -3,6 +3,7 @@ zen-router/settings.json
 zen-router/settings.json.bak-*
 zen-router/lanes.json
 zen-router/burned.json
+zen-router/*.tmp
 zen-router/*.log
 
 # Build/cache artifacts
