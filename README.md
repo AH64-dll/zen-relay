@@ -1,12 +1,12 @@
-# anu-ai-agent — Zen Relay 1.1.7
+# zen-relay — Zen Relay 1.1.7
 
 مرحّل متوافق مع OpenAI API، يوزّع الطلبات على عناوين خروج متغيرة (rotating egress IPs) لتفادي حدود المعدل المفروضة لكل IP. يحتوي هذا الريبو النسخة الكاملة من مشروع **zen-router** داخل `zen-router/`، مع ملف تنفيذي جاهز لـ **Linux x86_64** لتشغيل مباشر.
 
 ## التشغيل السريع (Linux x86_64)
 
 ```bash
-git clone https://github.com/utopianumber39ray-spec/anu-ai-agent.git
-cd anu-ai-agent
+git clone https://github.com/utopianumber39ray-spec/zen-relay.git
+cd zen-relay
 ./run.sh
 ```
 
@@ -87,8 +87,8 @@ A self-contained OpenAI-compatible relay with rotating egress IPs, built from th
 ## Quick start (Linux x86_64)
 
 ```bash
-git clone https://github.com/utopianumber39ray-spec/anu-ai-agent.git
-cd anu-ai-agent
+git clone https://github.com/utopianumber39ray-spec/zen-relay.git
+cd zen-relay
 ./run.sh
 ```
 
