@@ -19,7 +19,10 @@ os="$(uname -s)"
 arch="$(uname -m)"
 
 if [ "$os" = "Linux" ] && { [ "$arch" = "x86_64" ] || [ "$arch" = "amd64" ]; } && [ -x bin/zen-relay ]; then
-  exec ./bin/zen-relay
+  # ldd also catches a glibc version mismatch (e.g. GLIBC_2.34 not found).
+  if ! command -v ldd >/dev/null 2>&1 || ldd bin/zen-relay >/dev/null 2>&1; then
+    exec ./bin/zen-relay
+  fi
 fi
 
 if command -v cargo >/dev/null 2>&1; then
@@ -32,7 +35,7 @@ if command -v cargo >/dev/null 2>&1; then
 fi
 
 cat <<'EOF'
-No runnable prebuilt binary for this platform and cargo was not found.
+The prebuilt binary is not usable here (wrong platform or glibc older than 2.34), and cargo was not found.
 
 - Linux x86_64: bin/zen-relay is included and runs directly.
 - macOS / Windows / other architectures:

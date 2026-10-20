@@ -48,7 +48,7 @@ curl http://127.0.0.1:8901/healthz
 
 ## المتطلبات
 
-- **Linux x86_64:** الملف `zen-router/bin/zen-relay` جاهز (glibc). شغّله مباشرة.
+- **Linux x86_64:** الملف `zen-router/bin/zen-relay` جاهز (يتطلب glibc 2.34 أو أحدث: Ubuntu 22.04+، Debian 12+). شغّله مباشرة.
 - **macOS / Windows / معماريات أخرى:** ثبّت Rust من <https://rustup.rs> ثم:
 
 ```bash
@@ -59,6 +59,8 @@ cd ..
 ```
 
 أو أعد تشغيل `./run.sh` وسيبني من المصدر تلقائياً عند وجود `cargo`.
+
+إذا ظهر خطأ `GLIBC_2.34 not found` على توزيعة قديمة، استخدم بناء المصدر أعلاه.
 
 ## تخصيص التشغيل
 
@@ -111,6 +113,8 @@ Health check: `curl http://127.0.0.1:8901/healthz`
 Defaults: upstream `https://opencode.ai/inference/openai/v1`, upstream key `public`, loopback-only, no external account required.
 
 ## Other platforms
+
+The prebuilt binary requires glibc 2.34+ (Ubuntu 22.04+, Debian 12+). On older systems, build from source.
 
 Install Rust from <https://rustup.rs>, then:
 
