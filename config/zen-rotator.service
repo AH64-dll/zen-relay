@@ -1,0 +1,34 @@
+# Standalone unit for the relay only.
+#
+# Use this when you do NOT run the DSH stack supervisor: dsh-stack spawns the
+# relay itself, and its installer disables this unit so the two cannot fight
+# over port 8901.
+#
+# Install:
+#   sed "s|@ROOT@|$PWD|g" config/zen-rotator.service \
+#     > ~/.config/systemd/user/zen-rotator.service
+#   systemctl --user daemon-reload && systemctl --user enable --now zen-rotator
+#
+# Remote access: uncomment HOST=0.0.0.0 ONLY behind a firewall or a tunnel.
+# See docs/OTHER-DEVICES.md.
+
+[Unit]
+Description=Zen relay — OpenAI-compatible relay with rotating egress IPs
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@ROOT@/zen-router
+Environment=PORT=8901
+# Environment=HOST=0.0.0.0
+Environment=SETTINGS_FILE=@ROOT@/zen-router/settings.json
+Environment=LANES_FILE=@ROOT@/zen-router/lanes.json
+Environment=BURNED_FILE=@ROOT@/zen-router/burned.json
+ExecStart=@ROOT@/zen-router/bin/zen-relay
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,38 @@
+[Unit]
+Description=DSH stack supervisor (Harness + model proxy + Cloudflare tunnel)
+Documentation=file://%h/Music/dsh-stack/README.md
+# The supervisor performs its own network gate (a real TCP connection) before it
+# starts anything, so this ordering hint only shortens the boot race.
+After=network-online.target
+Wants=network-online.target
+# A crash-looping UI host helps nobody: the daemon enforces its own restart
+# budget and exits for systemd to restart with backoff, so systemd must not add
+# a second, coarser limit on top of it.
+StartLimitIntervalSec=0
+
+[Service]
+Type=notify
+# systemd-notify is a child process, so READY/WATCHDOG must be accepted from it.
+NotifyAccess=all
+Environment=PATH=%h/.local/node24/node-v24.22.0-linux-x64/bin:%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=DSH_HOME=%h/.dsh
+Environment=DSH_STACK_CONFIG=%h/.config/dsh-stack/config.json
+WorkingDirectory=%h
+ExecStart=/usr/bin/env node %h/Music/dsh-stack/bin/dsh-stack run
+# Always come back; the daemon's own budget prevents a hot loop.
+Restart=always
+RestartSec=3
+# One cgroup for the whole tree: stopping this unit stops the proxy, the tunnel
+# and the Harness (and their MCP children) even if the supervisor is wedged.
+KillMode=control-group
+KillSignal=SIGTERM
+# Proxy + tunnel + Harness readiness (the Harness boot alone may take minutes).
+TimeoutStartSec=300
+TimeoutStopSec=45
+# The daemon pings only while it is making progress, so a wedged supervisor is
+# restarted by systemd instead of lingering as a half-dead UI.
+WatchdogSec=90
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

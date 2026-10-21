@@ -1,0 +1,32 @@
+# Caddy reverse proxy for a shared relay (optional)
+#
+# Why you may want this instead of exposing the relay directly:
+#   * adds CORS headers, so browser-based OpenAI UIs on another origin work;
+#   * answers OPTIONS preflight, which the relay itself does not;
+#   * hides the admin surface (/api/*) from every device but the server itself;
+#   * terminates TLS with an automatic certificate (no Cloudflare needed).
+#
+# Run:  caddy run --config config/Caddyfile.example
+# DNS:  point relay.example.com at this machine (A/AAAA) before starting.
+
+relay.example.com {
+	encode zstd gzip
+
+	# The inference key is also the admin key. Remote devices must not be able
+	# to rewrite settings, refresh the pool, or read lane state.
+	@admin path /api/*
+	respond @admin 404
+
+	@preflight method OPTIONS
+	respond @preflight 204
+
+	header {
+		Access-Control-Allow-Origin  "*"
+		Access-Control-Allow-Headers "Authorization, Content-Type"
+		Access-Control-Allow-Methods "GET, POST, OPTIONS"
+		Access-Control-Max-Age      "86400"
+		-Server
+	}
+
+	reverse_proxy 127.0.0.1:8901
+}

@@ -1,0 +1,21 @@
+{
+  "name": "dsh-stack",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Boot orchestration and supervision for the DeepSeek Harness: starts the model proxy, the tunnel and the Harness in dependency order, proves each one ready, and heals them.",
+  "bin": {
+    "dsh-stack": "./bin/dsh-stack"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "start": "node bin/dsh-stack run",
+    "status": "node bin/dsh-stack status",
+    "selftest": "node bin/dsh-stack selftest",
+    "doctor": "node bin/dsh-stack doctor",
+    "sessions": "node bin/dsh-stack sessions"
+  }
+}

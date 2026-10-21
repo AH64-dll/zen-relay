@@ -1,0 +1,29 @@
+# Inserts the session recovery engine into this profile.
+#
+# Every value below can be overridden from the profile's own patch layer; the
+# plugin clamps anything unsafe (see lib/keeper.mjs normalizeConfig).
+- insert:
+    - id: dsh-session-keeper
+      name: '@local/dsh-session-keeper'
+      config:
+        enabled: true
+        autoRecover: true
+        dryRun: false
+        settleMs: 6000
+        # Automatic passes ignore turns whose last event is older than a day:
+        # an open turn from last week is abandoned work, not a crash. Manual
+        # `/keeper recover` ignores this. 0 disables the gate.
+        maxAgeMs: 86400000
+        proxyHealthUrl: http://127.0.0.1:8901/healthz
+        requireProxy: true
+        maxConcurrent: 2
+        maxResumesPerBoot: 5
+        includeSubagents: false
+        # Empty list = every workspace. Add absolute paths to restrict recovery.
+        cwds: []
+        ledger:
+          maxAttemptsPerTurn: 1
+          maxAttemptsPerSession: 3
+          maxUnresolvedIntents: 3
+          sessionWindowMs: 21600000
+          quarantineMs: 86400000

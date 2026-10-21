@@ -1,8 +1,30 @@
-# zen-relay — Zen Relay 1.1.8
+# zen-relay — Relay + Harness stack (Zen Relay 1.1.8)
 
-مرحّل متوافق مع OpenAI API، يوزّع الطلبات على عناوين خروج متغيرة (rotating egress IPs) لتفادي حدود المعدل المفروضة لكل IP. هذا المستودع مخصّص لنسخة **Rust** فقط: المصدر داخل `zen-router/rust/`، والملف التنفيذي الجاهز في `zen-router/bin/zen-relay`.
+مرحّل متوافق مع OpenAI API يوزّع الطلبات على عناوين خروج متغيرة (rotating egress
+IPs) لتفادي حدود المعدل المفروضة لكل IP، مع حزمة تشغيل كاملة تربطه بـDeepSeek
+Harness وتنشره على نفق HTTPS.
 
-## التشغيل السريع (Linux x86_64)
+**النسخة الحالية: 1.1.8** · المصدر: `zen-router/rust/` · الملف التنفيذي:
+`zen-router/bin/zen-relay`.
+
+---
+
+## ما يحتويه المستودع
+
+| المسار | الوصف |
+|---|---|
+| `zen-router/rust/` | مصدر Rust الكامل للمرحّل |
+| `zen-router/bin/zen-relay` | ملف تنفيذي جاهز لـLinux x86_64 |
+| `run.sh` | تشغيل بأمر واحد (تنفيذي جاهز أو بناء من المصدر) |
+| `install.sh` | تثبيت الحزمة كاملة: مرحّل + نفق + Harness |
+| `stack/` | مشرف `dsh-stack` + plugin استئناف الجلسات `session-keeper` |
+| `config/` | إعدادات نموذجية: `settings.example.json`، وحدة systemd، وربط dsh، وCaddyfile |
+| `scripts/expose-relay.sh` | نشر المرحّل على نفق Cloudflare وطباعة العنوان والمفتاح |
+| `docs/` | المعمارية، التشغيل على أجهزة أخرى، التثبيت، استكشاف الأخطاء |
+
+---
+
+## التشغيل السريع (المرحّل وحده)
 
 ```bash
 git clone https://github.com/AH64-dll/zen-relay.git
@@ -11,52 +33,41 @@ cd zen-relay
 ```
 
 أول تشغيل:
-- ينشئ `zen-router/settings.json` تلقائياً.
-- يولّد مفتاحاً عشوائياً للمرحّل (`relay_api_key`).
-- يستمع على `http://127.0.0.1:8901` فقط.
-- يبدأ ببناء pool من البروكسيات المجانية (يحتاج بعض الثواني ليصبح جاهزاً).
-
-### قراءة مفتاح المرحّل
+- ينشئ `zen-router/settings.json` ويولّد `relay_api_key` عشوائياً؛
+- يستمع على `http://127.0.0.1:8901`؛
+- يبدأ ببناء pool من البروكسيات الحرة (يحتاج ثوانٍ ليصبح جاهزاً).
 
 ```bash
-grep -o 'rly_[0-9a-f]\{32\}' zen-router/settings.json | head -1
+grep -oE 'rly_[0-9a-f]{32}' zen-router/settings.json | head -1   # المفتاح
+curl -s http://127.0.0.1:8901/healthz                             # الجاهزية
 ```
 
-### الاستخدام من أي عميل OpenAI
+استخدمه من أي عميل OpenAI:
 
 - **Base URL:** `http://127.0.0.1:8901/v1`
-- **API Key:** المفتاح أعلاه
-- **Model:** مثال `deepseek-v4.1-flash-free` (أو أي موديل متاح من الوجهة)
+- **API key:** المفتاح أعلاه
+- **Model:** مثال `deepseek-v4.1-flash-free`
 
-فحص الصحة:
+### الاستخدام من أجهزة أخرى
 
-```bash
-curl http://127.0.0.1:8901/healthz
-```
-
-## الإعدادات الافتراضية
-
-- الوجهة: `https://opencode.ai/inference/openai/v1`
-- مفتاح الوجهة: `public` (الطبقة المجانية في OpenCode Zen — لا يحتاج حساباً)
-- المنفذ: `8901`
-- الاستماع: `127.0.0.1` فقط
-- الـpool: 30–40 lane، مع فحص حقيقي لكل بروكسي قبل ترقيته
-
-لا حاجة لأي مفتاح أو حساب خارجي. المرحّل يحمل بصمة OpenCode المطلوبة للطبقة المجانية.
-
-## المتطلبات
-
-- **Linux x86_64:** الملف `zen-router/bin/zen-relay` جاهز (يتطلب glibc 2.34 أو أحدث: Ubuntu 22.04+، Debian 12+). شغّله مباشرة.
-- **macOS / Windows / معماريات أخرى:** ثبّت Rust من <https://rustup.rs> ثم:
+هذا ما كان المستودع ينقصه. التفاصيل الكاملة في
+[`docs/OTHER-DEVICES.md`](docs/OTHER-DEVICES.md)، والخلاصة:
 
 ```bash
-cd zen-router/rust
-cargo build --release
-cd ..
-./rust/target/release/zen-relay        # على Windows: zen-relay.exe
+scripts/expose-relay.sh
+# base URL : https://<name>.trycloudflare.com/v1
+# api key  : rly_...
 ```
 
-أو أعد تشغيل `./run.sh` وسيبني من المصدر تلقائياً عند وجود `cargo`.
+ثم على الجهاز الآخر:
+
+```bash
+export OPENAI_BASE_URL=https://<name>.trycloudflare.com/v1
+export OPENAI_API_KEY=rly_...
+```
+
+> `zen-relay` ليس VPN: هو OpenAI-compatible API فقط. أي جهاز يستخدمه يجب أن يكون
+> عميل OpenAI API (تطبيق، SDK، أو Harness).
 
 إذا ظهر خطأ `GLIBC_2.34 not found` على توزيعة قديمة، استخدم بناء المصدر أعلاه.
 
@@ -80,52 +91,67 @@ PORT=8901 HOST=127.0.0.1 ./run.sh
 - `probe_model` يُتحقق منه مقابل قائمة الموديلات الحقيقية عند الإقلاع، ويُستبدل تلقائياً إن لم يعد متوفراً.
 - استخدم الأداة وفق شروط مزوّد الخدمة. الهدف منها توزيع الحدود المسموحة لكل IP، لا تجاوزها.
 
+القيود المعروفة: نفق quick يتغيّر اسمه عند كل تشغيل، مفتاح واحد يصلح أيضاً
+لإدارة `/api/*`، ولا CORS لواجهات المتصفح. الحلول في نفس المستند.
+
 ---
 
-# English
-
-A self-contained OpenAI-compatible relay with rotating egress IPs, built from the **zen-relay 1.1.8** Rust source.
-
-## Quick start (Linux x86_64)
+## الحزمة كاملة (مرحّل + نفق + Harness)
 
 ```bash
-git clone https://github.com/AH64-dll/zen-relay.git
-cd zen-relay
-./run.sh
+./install.sh --dry-run     # عرض الخطوات فقط
+./install.sh               # تثبيت وتشغيل
 ```
 
-The first run creates `zen-router/settings.json` with a random relay API key, listens on `127.0.0.1:8901`, and starts warming a proxy pool.
+`install.sh` يستدعي `stack/install.sh`، الذي:
 
-Read the key:
+1. يكتشف `node`, `dsh`, `zen-relay`, `cloudflared` ويتحقق من `node >= 22`؛
+2. يكتب `~/.config/dsh-stack/config.json`؛
+3. يعطّل الوحدات القديمة المتعارضة ويسجّل حالتها للاسترجاع؛
+4. يثبّت `dsh-stack.service` (`Type=notify`, `WatchdogSec=90`)، ويشغّله؛
+5. ينتظر جاهزية المرحّل ثم النفق ثم الـHarness، وينشر رابط الدخول في
+   `~/dsh-url.txt`.
 
-```bash
-grep -o 'rly_[0-9a-f]\{32\}' zen-router/settings.json | head -1
+بعدها اربط الـHarness بالمرحّل عبر
+[`config/dsh-cordis.patch.yml`](config/dsh-cordis.patch.yml)، وضع المفتاح في مخزن
+الاعتماد باسم `OMP_ZEN_RELAY_KEY`.
+
+الشكل الكامل:
+
+```
+client ──HTTPS──▶ cloudflared ──▶ dsh web :30141 ──▶ zen-relay :8901 ──▶ opencode.ai
+                                      ▲
+                                 dsh-stack (systemd --user)
 ```
 
-Use any OpenAI-compatible client with:
+التفاصيل في [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
-- **Base URL:** `http://127.0.0.1:8901/v1`
-- **API key:** the generated `relay_api_key`
-- **Model:** e.g. `deepseek-v4.1-flash-free`
+---
 
-Health check: `curl http://127.0.0.1:8901/healthz`
+## الإعدادات الافتراضية
 
-Defaults: upstream `https://opencode.ai/inference/openai/v1`, upstream key `public`, loopback-only, no external account required.
+- الوجهة: `https://opencode.ai/inference/openai/v1` (مفتاح `public`، الطبقة المجانية)
+- المنفذ: `8901`، الاستماع: `127.0.0.1` فقط (`HOST`/`PORT` للتغيير)
+- الـpool: 30–40 lane، فحص حقيقي لكل بروكسي قبل ترقيته
+- `upstream_user_agent`: بصمة OpenCode — بدونها ترفض الطبقة المجانية الطلب
 
-## Other platforms
+كل الحقول في [`config/settings.example.json`](config/settings.example.json).
 
-The prebuilt binary requires glibc 2.34+ (Ubuntu 22.04+, Debian 12+). On older systems, build from source.
+---
 
-Install Rust from <https://rustup.rs>, then:
+## المتطلبات
 
-```bash
-cd zen-router/rust
-cargo build --release
-cd ..
-./rust/target/release/zen-relay
-```
+- **Linux x86_64:** الملف الجاهز يتطلب glibc 2.34+ (Ubuntu 22.04+، Debian 12+).
+- **macOS / Windows / معماريات أخرى:** ثبّت Rust ثم:
 
-`./run.sh` builds from source automatically when `cargo` is available.
+  ```bash
+  cd zen-router/rust && cargo build --release
+  ```
+
+  أو أعد تشغيل `./run.sh` وسيبني تلقائياً عند وجود `cargo`.
+- **الحزمة كاملة:** Node 22+، `dsh`، و`cloudflared` (اختياري للنفق).
+
+---
 
 ## Security notes
 
@@ -140,5 +166,19 @@ cd ..
 - `zen-router/rust/` — Rust source (Cargo).
 - `zen-router/bin/zen-relay` — prebuilt Linux x86_64 binary (v1.1.8).
 - `run.sh` — one-command launcher (prebuilt binary or source build).
+- `install.sh`, `stack/`, `config/`, `scripts/`, `docs/` — full relay + tunnel + Harness supervisor stack; see `docs/INSTALL.md`.
 
-Build artifacts, runtime state, and secrets are excluded; the relay regenerates them on first run.
+## المسارات والأسرار
+
+لا تُرفع إلى Git: `zen-router/settings.json` (فيه المفتاح)، `lanes.json`،
+`burned.json`، `~/.dsh/.credentials.yaml`، `~/dsh-url.txt`. المستودع يحتوي
+`.gitignore` يمنعها.
+
+---
+
+## License
+
+MIT — انظر [LICENSE](LICENSE).
+
+> استخدم الأداة وفق شروط مزوّد الخدمة. الهدف توزيع الحدود المسموحة لكل IP، لا
+> تجاوزها.

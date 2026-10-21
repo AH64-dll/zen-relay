@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Session Keeper">
+  <rect x="4" y="4" width="56" height="56" rx="14" fill="#12211c"/>
+  <path d="M20 40c0-7 5-12 12-12s12 5 12 12" fill="none" stroke="#57d9a3" stroke-width="3" stroke-linecap="round"/>
+  <circle cx="32" cy="22" r="6" fill="none" stroke="#57d9a3" stroke-width="3"/>
+  <path d="M15 47h34" stroke="#57d9a3" stroke-width="3" stroke-linecap="round" opacity="0.55"/>
+  <path d="M24 47l4-6 4 6" fill="none" stroke="#57d9a3" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="40" cy="44" r="2.5" fill="#57d9a3"/>
+</svg>
