@@ -5,12 +5,12 @@
 # store through `apiKeyEnv`, so this file stays safe to commit.
 #
 # Put the key in place once (the value is the `relay_api_key` from
-# zen-router/settings.json):
-#
-#   dsh config credentials set OMP_ZEN_RELAY_KEY rly_...
-#
-# If your dsh build has no credentials CLI, export the variable in the unit:
-#   Environment=OMP_ZEN_RELAY_KEY=rly_...
+# zen-router/settings.json). dsh 0.2.x has no `dsh config credentials`
+# command, so either:
+#   - store it from the Harness Models page (the credentials service), or
+#   - export it to the supervisor from a 0600 env file:
+#       EnvironmentFile=%h/.config/dsh-stack/relay.env
+#     containing OMP_ZEN_RELAY_KEY=rly_...
 #
 # baseURL must stay loopback when the Harness and the relay share a machine.
 # For a relay on another host use https://<public-host>/v1 (see
