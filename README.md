@@ -271,6 +271,36 @@ tailscale --socket=/run/tailscale/tailscaled.sock funnel --bg 30141
 
 كل الحقول في [`config/settings.example.json`](config/settings.example.json).
 
+### لماذا لا ينتج المرحّل إجابات اليوم
+
+مقيس على هذا الجهاز (انظر `scripts/probe-proxy-supply.sh`):
+
+| الفحص | النتيجة |
+|---|---|
+| بروكسيات socks5 حرة able على حمل HTTPS إلى `opencode.ai` | **20 من 120** (16.7%) — أي أنّ **المورّد حيّ** |
+| بروكسيات http حرة able على CONNECT إلى `opencode.ai` | 3 من 120 (2.5%) |
+| إكمال حقيقي عبر socks5 مع بصمة OpenCode المزوَّرة | **HTTP 403** |
+
+ردّ المزوّد حرفياً:
+
+```
+OpenCode's free tier can only be used from within OpenCode.
+Download it at https://opencode.ai and keep building.
+```
+
+إذن المشكلتان منفصلتان: **المورّد موجود**، والعائق هو **هوية العميل**. البصمة
+المزوَّرة (ترويسات `x-opencode-*` + `User-Agent`) لم تعد تكفي؛ الطلب يجب أن
+يأتي من داخل OpenCode نفسه. لذلك:
+
+- `zen-relay` (يموّه ويبدّل عناوين) لا يمكن أن يعمل بالطريقة الأصلية مهما
+  تحسّن المورّد.
+- ما يعمل هو أن يمرّ الطلب من **عميل OpenCode الرسمي** — وهذا ما يفعله
+  `opencode-bridge` (يوجّه الطلب إلى خادم OpenCode المحلي، فيصل الطلب من
+  OpenCode نفسه).
+
+للعلم: خادم Bun (الذي يعمل عليه OpenCode) يحترم `HTTP_PROXY`/`HTTPS_PROXY`،
+لكنه **لا يفهم `socks5://`** — يقبل `http://` فقط.
+
 ---
 
 ## المتطلبات
