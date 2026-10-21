@@ -32,7 +32,7 @@ const USAGE = `dsh-stack ${VERSION} — boot orchestrator and supervisor for Har
 Usage:
   dsh-stack run                    supervise the stack (systemd entry point)
   dsh-stack status [--json]        print the status document (--probe for live checks)
-  dsh-stack wait --target T        block until T answers (proxy | harness | all)
+  dsh-stack wait --target T        block until T answers (proxy | bridge | harness | all)
               [--timeout MS]
   dsh-stack selftest               probe config, proxy, harness and the session store
   dsh-stack doctor                 validate binaries, paths, permissions and units
@@ -185,11 +185,17 @@ async function commandWait(flags) {
   if (target === 'harness' || target === 'all') {
     checks.push({ name: 'harness', run: () => httpProbe(config.harness.healthUrl, { timeoutMs: config.health.timeoutMs }) });
   }
+  if (config.bridge.mode !== 'off' && (target === 'bridge' || target === 'all')) {
+    checks.push({
+      name: 'bridge',
+      run: () => httpProbe(config.bridge.healthUrl, { timeoutMs: config.health.timeoutMs, expectJsonOk: true }),
+    });
+  }
   if (target === 'network') {
     checks.push({ name: 'network', run: () => tcpProbe(config.network.host, config.network.port, 5_000) });
   }
   if (checks.length === 0) {
-    process.stderr.write(`unknown --target ${target} (proxy|harness|all|network)\n`);
+    process.stderr.write(`unknown --target ${target} (proxy|bridge|harness|all|network)\n`);
     return 2;
   }
   const results = await Promise.all(
@@ -274,8 +280,15 @@ async function commandDoctor() {
   line('INFO', 'harness', `${config.harness.command} web --port ${config.harness.port}${config.harness.mode === 'own' ? '' : ' (external)'}`);
   line('INFO', `proxy (${config.proxy.mode})`, config.proxy.healthUrl);
   line('INFO', `tunnel (${config.tunnel.mode})`, config.tunnel.mode === 'own' ? config.tunnel.command.join(' ') : '—');
+  line('INFO', `bridge (${config.bridge.mode})`, config.bridge.mode === 'off' ? '—' : config.bridge.healthUrl);
 
   if (!exists(config.harness.command)) line('FAIL', 'dsh binary missing or not executable', config.harness.command);
+  if (config.bridge.mode === 'own') {
+    // The bridge is started through the node binary, so the script itself only
+    // has to exist — the executable bit is not required.
+    const script = config.bridge.command[1] ?? '';
+    if (!fs.existsSync(script)) line('FAIL', 'bridge script missing', script);
+  }
   if (config.proxy.mode === 'own') {
     if (!exists(config.proxy.command[0])) line('FAIL', 'proxy binary missing or not executable', config.proxy.command[0]);
     if (!fs.existsSync(config.proxy.cwd)) line('FAIL', 'proxy working directory missing', config.proxy.cwd);
@@ -307,6 +320,10 @@ async function commandDoctor() {
   line(proxy.ok ? 'OK' : 'WARN', 'proxy currently', proxy.detail);
   const harness = await httpProbe(config.harness.healthUrl, { timeoutMs: 3_000 });
   line(harness.ok ? 'OK' : 'WARN', 'harness currently', harness.detail);
+  if (config.bridge.mode !== 'off') {
+    const bridge = await httpProbe(config.bridge.healthUrl, { timeoutMs: 5_000, expectJsonOk: true });
+    line(bridge.ok ? 'OK' : 'WARN', 'bridge currently', bridge.detail);
+  }
 
   lines.push(`\n${problems === 0 ? 'doctor: no blocking problems' : `doctor: ${problems} blocking problem(s)`}`);
   process.stdout.write(`${lines.join('\n')}\n`);

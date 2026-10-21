@@ -19,6 +19,45 @@
 - id: llm-pi-ai
   config:
     providers:
+      # The bridge route: the Harness speaks OpenAI to a local bridge, the
+      # bridge drives a local OpenCode server, and OpenCode itself calls the
+      # upstream. The provider sees the official client, so the models OpenCode
+      # is allowed to use are the ones the Harness gets.
+      opencode-bridge:
+        displayName: OpenCode (local bridge)
+        api: openai-completions
+        apiKeyEnv: OMP_ZEN_RELAY_KEY
+        baseURL: http://127.0.0.1:8902/v1
+        retryPolicy:
+          mode: normal
+          maxRetries: 4
+          retryableCodes: [EMPTY_RESPONSE, RATE_LIMIT, SERVER, TIMEOUT, TRANSPORT]
+          backoff:
+            initialDelayMs: 800
+            maxDelayMs: 15000
+            jitterRatio: 0.25
+        models:
+          - id: deepseek-v4.1-flash-free
+            name: DeepSeek V4.1 Flash (free, via OpenCode)
+            contextWindow: 200000
+            input: [text, image]
+          - id: beam-free
+            name: Beam (free, via OpenCode)
+            contextWindow: 1048576
+          - id: mimo-v2.6-flash-free
+            name: MiMo v2.6 Flash (free, via OpenCode)
+            contextWindow: 200000
+          - id: glm-5.3-flash-free
+            name: GLM 5.3 Flash (free, via OpenCode)
+            contextWindow: 200000
+          - id: nemotron-3.5-lightning-free
+            name: Nemotron 3.5 Lightning (free, via OpenCode)
+            contextWindow: 262144
+          - id: minimax-m3.1-flash-free
+            name: MiniMax M3.1 Flash (free, via OpenCode)
+            contextWindow: 1000000
+      # The relay route: rotating free proxies towards the upstream. It only
+      # works while the provider lets non-OpenCode clients use the free tier.
       opencode-zen:
         displayName: OpenCode Zen (local relay)
         api: openai-completions
@@ -105,5 +144,5 @@
 
 - id: agent-default-model
   config:
-    provider: opencode-zen
+    provider: opencode-bridge
     model: deepseek-v4.1-flash-free

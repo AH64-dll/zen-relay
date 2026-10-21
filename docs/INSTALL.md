@@ -52,10 +52,13 @@ cd zen-relay
 
 ما يفعله:
 
-1. يتحقق من `node >= 22` و`dsh` و`cloudflared`.
+1. يتحقق من `node >= 22` و`dsh` و`cloudflared` و`opencode`.
 2. ينشئ `zen-router/settings.json` إن لم يوجد ويطبع المفتاح.
 3. يستدعي `stack/install.sh` الذي:
    - يكتشف المسارات ويكتب `~/.config/dsh-stack/config.json`;
+   - يفعّل الجسر (`opencode-bridge`) إن وُجد `opencode` على الجهاز — وهو
+     ما يجعل نماذج OpenCode المجانية تصل إلى الـHarness، لأن الطلب يصدر من
+     عميل OpenCode نفسه. عطّله بـ`--no-bridge`;
    - يعطّل الوحدات القديمة المتعارضة (`dsh-harness`, `zen-rotator`,
      `cloudflared-tunnel`) ويسجل حالتها للاسترجاع;
    - يثبّت `dsh-stack.service` (‏`Type=notify`, `WatchdogSec=90`)؛

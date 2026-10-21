@@ -49,7 +49,7 @@ export class Stack {
     this.fatalReason = undefined;
 
     /** @type {Record<string, {lastRestartAt: number, consecutive: number, history: number[], healthySince: number|undefined}>} */
-    this.restartState = { proxy: freshRestart(), tunnel: freshRestart(), harness: freshRestart() };
+    this.restartState = { proxy: freshRestart(), tunnel: freshRestart(), bridge: freshRestart(), harness: freshRestart() };
 
     /** @type {{token?: string, host?: string, url?: string, published?: number}} */
     this.signIn = {};
@@ -195,6 +195,7 @@ export class Stack {
     const graceMs = this.config.restart.graceMs;
     await this.stopComponent('harness', reason, graceMs);
     await this.stopComponent('tunnel', reason, graceMs);
+    await this.stopComponent('bridge', reason, graceMs);
     await this.stopComponent('proxy', reason, graceMs);
     this.releaseInstanceLock();
     this.logger.info('stack-stopped', { reason });
@@ -244,7 +245,26 @@ export class Stack {
         this.components.tunnel = undefined;
       }
 
-      // 3. Harness — only behind a proven route.
+      // 3. Bridge — the OpenAI-compatible front end for a local OpenCode
+      // server. When it is required, the Harness waits for it: a Harness
+      // whose model route is missing turns every turn into an error.
+      if (config.bridge.mode === 'own' || config.bridge.mode === 'external') {
+        const bridgeReady = config.bridge.mode === 'external'
+          ? await this.probeExternalBridge()
+          : await this.converge('bridge');
+        if (!bridgeReady && config.bridge.required) {
+          this.logger.warn('bridge-not-ready', { why: options.why });
+          await this.stopComponent('harness', 'bridge unavailable');
+          this.status.phase = 'starting';
+          this.updateStatus();
+          this.kick('waiting-bridge');
+          return;
+        }
+      } else if (config.bridge.mode === 'off') {
+        this.components.bridge = undefined;
+      }
+
+      // 4. Harness — only behind a proven route.
       const host = this.tunnelTargetHost();
       if (host !== undefined && host !== this.harnessTrustedHost) {
         if (this.components.harness?.alive === true) {
@@ -318,6 +338,19 @@ export class Stack {
         },
       });
     }
+    if (config.bridge.mode === 'own' && this.components.bridge === undefined) {
+      this.components.bridge = new Component({
+        name: 'bridge',
+        command: config.bridge.command,
+        cwd: config.bridge.cwd,
+        env: { ...process.env, ...config.bridge.env },
+        logger: this.logger.child('bridge'),
+        readyTimeoutMs: config.bridge.readyTimeoutMs,
+        ready: () => this.bridgeProbe(),
+        probe: () => this.bridgeProbe(),
+        onExit: () => this.kick('bridge-exited'),
+      });
+    }
     if (config.harness.mode === 'own' && this.components.harness === undefined) {
       this.components.harness = new Component({
         name: 'harness',
@@ -337,7 +370,7 @@ export class Stack {
   /**
    * Bring one component to ready, restarting it when it is down, wedged, or
    * has failed enough consecutive probes.
-   * @param {'proxy'|'tunnel'|'harness'} name
+   * @param {'proxy'|'tunnel'|'bridge'|'harness'} name
    * @returns {Promise<boolean>}
    */
   async converge(name) {
@@ -384,7 +417,7 @@ export class Stack {
     }
   }
 
-  /** @param {'proxy'|'tunnel'|'harness'} name */
+  /** @param {'proxy'|'tunnel'|'bridge'|'harness'} name */
   async stopComponent(name, reason, graceMs) {
     const component = this.components[name];
     if (component === undefined) return;
@@ -399,7 +432,9 @@ export class Stack {
   async restartNow(name, reason) {
     if (this.stopping) return;
     try {
-      if (name === 'proxy' || name === 'tunnel') await this.stopComponent('harness', `restart ${name}`);
+      if (name === 'proxy' || name === 'tunnel' || name === 'bridge') {
+        await this.stopComponent('harness', `restart ${name}`);
+      }
       await this.stopComponent(name, reason);
       this.kick(`restart-${name}`);
     } catch (error) {
@@ -421,6 +456,27 @@ export class Stack {
 
   harnessProbe() {
     return httpProbe(this.config.harness.healthUrl, { timeoutMs: this.config.health.timeoutMs });
+  }
+
+  /**
+   * The bridge is ready when it reports `ok:true`, which it only does when the
+   * OpenCode server behind it answers.
+   */
+  bridgeProbe() {
+    return httpProbe(this.config.bridge.healthUrl, {
+      timeoutMs: this.config.health.timeoutMs,
+      expectJsonOk: true,
+    });
+  }
+
+  /** External bridge: gate on readiness, never restart something we do not own. */
+  async probeExternalBridge() {
+    const result = await this.bridgeProbe();
+    this.lastProgressAt = Date.now();
+    if (!result.ok) {
+      this.logger.warn('external-bridge-down', { detail: result.detail, url: this.config.bridge.healthUrl });
+    }
+    return result.ok;
   }
 
   /** External proxy: gate on readiness, never restart something we do not own. */
@@ -531,7 +587,7 @@ export class Stack {
 
   // -------------------------------------------------------------- restarts
 
-  /** @param {'proxy'|'tunnel'|'harness'} name */
+  /** @param {'proxy'|'tunnel'|'bridge'|'harness'} name */
   admitRestart(name) {
     const state = this.restartState[name];
     const now = Date.now();
@@ -544,7 +600,7 @@ export class Stack {
     return true;
   }
 
-  /** @param {'proxy'|'tunnel'|'harness'} name */
+  /** @param {'proxy'|'tunnel'|'bridge'|'harness'} name */
   nextBackoff(name) {
     const state = this.restartState[name];
     const now = Date.now();

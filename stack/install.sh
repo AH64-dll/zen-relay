@@ -17,7 +17,7 @@
 #
 # Usage:
 #   ./install.sh [--dry-run] [--no-start] [--keep-legacy] [--no-tunnel]
-#                [--force] [--wait] [--uninstall [--purge]]
+#                [--no-bridge] [--force] [--wait] [--uninstall [--purge]]
 #
 set -euo pipefail
 
@@ -39,6 +39,7 @@ DRY_RUN=0
 KEEP_LEGACY=0
 START=1
 TUNNEL=own
+BRIDGE=1
 FORCE=0
 WAIT=0
 UNINSTALL=0
@@ -82,6 +83,7 @@ while [[ $# -gt 0 ]]; do
     --no-start) START=0 ;;
     --keep-legacy) KEEP_LEGACY=1 ;;
     --no-tunnel) TUNNEL=off ;;
+    --no-bridge) BRIDGE=0 ;;
     --force) FORCE=1 ;;
     --wait) WAIT=1 ;;
     --uninstall) UNINSTALL=1 ;;
@@ -131,6 +133,24 @@ preflight() {
   CLOUDFLARED_BIN=$(command -v cloudflared || true)
   [[ -n $CLOUDFLARED_BIN ]] && say "cloudflared $CLOUDFLARED_BIN" || warn "cloudflared not found; the public URL will be skipped"
 
+  # The bridge puts the Harness in front of a local OpenCode server, so the
+  # models OpenCode is allowed to use reach the Harness as well.
+  OPENCODE_BIN=$(command -v opencode || true)
+  if [[ -z $OPENCODE_BIN ]]; then
+    for candidate in "$HOME/.opencode/bin/opencode" "$HOME/.local/bin/opencode"; do
+      [[ -x $candidate ]] && { OPENCODE_BIN=$candidate; break; }
+    done
+  fi
+  if [[ $BRIDGE -eq 1 ]]; then
+    [[ -n $OPENCODE_BIN ]] || die "opencode not found; install it or pass --no-bridge to use the relay route only"
+    OPENCODE_URL=$("$OPENCODE_BIN" service status 2>/dev/null | grep -oE 'https?://[^ ]+' | head -1)
+    [[ -n $OPENCODE_URL ]] || OPENCODE_URL=http://127.0.0.1:49374
+    say "opencode    $OPENCODE_BIN ($OPENCODE_URL)"
+    BRIDGE_MODE=own
+  else
+    BRIDGE_MODE=off
+  fi
+
   if command -v loginctl >/dev/null; then
     linger=$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null || true)
     if [[ $linger != "yes" ]]; then
@@ -164,11 +184,15 @@ write_config() {
     dim "proxy.cwd       = ${PROXY_DIR:-<default>}"
     dim "tunnel.command  = ${CLOUDFLARED_BIN:-<unset>} tunnel --url http://127.0.0.1:30141 --no-autoupdate"
     dim "tunnel.mode     = $TUNNEL"
+    dim "bridge.mode     = $BRIDGE_MODE"
+    dim "bridge.opencode = ${OPENCODE_URL:-<unset>}"
     return 0
   fi
 
   ROOT="$ROOT" CONFIG_FILE="$CONFIG_FILE" DSH_BIN="$DSH_BIN" RELAY_BIN="${RELAY_BIN:-}" \
-  PROXY_DIR="${PROXY_DIR:-}" CLOUDFLARED_BIN="${CLOUDFLARED_BIN:-}" TUNNEL_MODE="$TUNNEL" node --input-type=module -e '
+  PROXY_DIR="${PROXY_DIR:-}" CLOUDFLARED_BIN="${CLOUDFLARED_BIN:-}" TUNNEL_MODE="$TUNNEL" \
+  BRIDGE_MODE="$BRIDGE_MODE" OPENCODE_BIN="${OPENCODE_BIN:-}" OPENCODE_URL="${OPENCODE_URL:-}" \
+  node --input-type=module -e '
     import fs from "node:fs";
     const { defaults, merge, toInstallDocument } = await import(
       new URL("lib/config.mjs", "file://" + process.env.ROOT + "/").href
@@ -221,6 +245,19 @@ write_config() {
     }
     // An explicit --no-tunnel must win over an older config file.
     next.tunnel.mode = process.env.TUNNEL_MODE;
+    // The bridge is the OpenAI-compatible front end for a local OpenCode
+    // server. Its mode is decided by the installer, not by an old config.
+    next.bridge = {
+      ...(next.bridge ?? {}),
+      mode: process.env.BRIDGE_MODE,
+    };
+    if (process.env.BRIDGE_MODE !== "off") {
+      next.bridge.env = {
+        ...(next.bridge.env ?? {}),
+        OPENCODE_BASE_URL: process.env.OPENCODE_URL,
+        OPENCODE_BIN: process.env.OPENCODE_BIN,
+      };
+    }
     next.configFile = undefined;
     next.$comment = "dsh-stack supervisor configuration. Edit freely; `dsh-stack doctor` validates it.";
 

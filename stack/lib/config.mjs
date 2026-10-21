@@ -115,6 +115,27 @@ export function defaults(env = process.env) {
       required: false,
     },
 
+    bridge: {
+      /**
+       * `own` spawns the OpenAI-compatible bridge in front of a local OpenCode
+       * server; `external` only probes one that is already running; `off`
+       * disables it. The bridge is what lets the Harness use the models that
+       * OpenCode itself is allowed to use.
+       */
+      mode: 'off',
+      command: [process.execPath, path.join(path.dirname(path.dirname(fileURLToPath(import.meta.url))), 'bridge', 'opencode-bridge.mjs')],
+      cwd: path.dirname(path.dirname(fileURLToPath(import.meta.url))),
+      env: {
+        PORT: '8902',
+        OPENCODE_BASE_URL: 'http://127.0.0.1:49374',
+        OPENCODE_BIN: findExecutable('opencode', env) ?? 'opencode',
+      },
+      healthUrl: 'http://127.0.0.1:8902/healthz',
+      readyTimeoutMs: 60_000,
+      /** When required, the Harness only starts once the bridge answers. */
+      required: false,
+    },
+
     harness: {
       mode: 'own',
       /** argv appended after the dsh binary; `--port`/`--no-open` are added automatically. */
@@ -254,6 +275,7 @@ export function toInstallDocument(config) {
     network: config.network,
     proxy: config.proxy,
     tunnel: config.tunnel,
+    bridge: config.bridge,
     harness: config.harness,
     health: config.health,
     restart: config.restart,
