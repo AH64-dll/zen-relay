@@ -278,7 +278,7 @@ tailscale --socket=/run/tailscale/tailscaled.sock funnel --bg 30141
 | الفحص | النتيجة |
 |---|---|
 | بروكسيات socks5 حرة قادرة على حمل HTTPS إلى `opencode.ai` | **20 من 120** (16.7%) — أي أنّ **المورّد حيّ** |
-| بروكسيات http حرة able على CONNECT إلى `opencode.ai` | 3 من 120 (2.5%) |
+| بروكسيات http حرة قادرة على CONNECT إلى `opencode.ai` | 3 من 120 (2.5%) |
 | إكمال حقيقي عبر socks5 مع بصمة OpenCode المزوَّرة | **HTTP 403** |
 
 ردّ المزوّد حرفياً:
