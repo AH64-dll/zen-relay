@@ -1,10 +1,10 @@
-# zen-relay — Relay + Harness stack (Zen Relay 1.1.9)
+# zen-relay — Relay + Harness stack (Zen Relay 1.2.0)
 
 مرحّل متوافق مع OpenAI API يوزّع الطلبات على عناوين خروج متغيرة (rotating egress
 IPs) لتفادي حدود المعدل المفروضة لكل IP، مع حزمة تشغيل كاملة تربطه بـDeepSeek
 Harness وتنشره على نفق HTTPS.
 
-**النسخة الحالية: 1.1.9** · المصدر: `zen-router/rust/` · الملف التنفيذي:
+**النسخة الحالية: 1.2.0** · المصدر: `zen-router/rust/` · الملف التنفيذي:
 `zen-router/bin/zen-relay`.
 
 ---
@@ -171,12 +171,68 @@ dsh web :30141 ──OpenAI/chat──▶ opencode-bridge :8902 ──session AP
 
 ---
 
+## مصدر البروكسيات: Webshare
+
+قوائم البروكسيات المجانية العامة شبه معطّلة الآن. القياس على هذا الجهاز:
+**189,204** عنواناً فريداً من 44 قائمة، ومن 300 عيّنة عشوائية:
+
+| المرحلة | العدد | النسبة |
+|---|---|---|
+| ميت (connection refused) | 213 | 71% |
+| حيّ لكنه لا يمرّر HTTPS (ولا حتى example.com) | 87 | 29% |
+| يصل إلى opencode.ai | **0** | **0%** |
+
+لذلك يدمج المرحّل مع **Webshare**: عناوين سكنية حقيقية. الخطة المجانية تعطي
+10 عناوين مضمونة العمل، والخطة المدفوعة تدوّر عنواناً جديداً مع كل طلب.
+
+```bash
+scripts/set-webshare-token.sh                 # يطلب المفتاح ويُخزّنه في settings.json
+scripts/set-webshare-token.sh --rotating      # مع تدوير العنوان كل طلب
+scripts/set-webshare-token.sh --rotating --country us
+```
+
+المفتاح يُكتب في `zen-router/settings.json` بصلاحية `0600`، أو عبر
+`WEBSHARE_TOKEN` في البيئة. الحقول:
+
+- `webshare_token`: مفتاح API من Webshare (Dashboard → API Keys)
+- `webshare_rotating`: يضيف بوابة backbone التي تعطي IP سكنياً جديداً كل اتصال
+- `webshare_country`: رمز الدولة للـIP (اختياري)
+- `rotating_cooldown_sec`: راحة الـlane الفاشلة قبل إعادة تجربتها (5 ثوانٍ افتراضياً)
+
+---
+
+## نفق ثابت (Named tunnel)
+
+نفق Cloudflare السريع يغيّر اسم النطاق عند كل إقلاع. لعنوان ثابت:
+
+```bash
+cloudflared tunnel login                       # يفتح المتصفح
+cloudflared tunnel create zen-harness
+cloudflared tunnel route dns zen-harness harness.example.com
+```
+
+ثم:
+
+```bash
+./install.sh --named-tunnel zen-harness --tunnel-hostname harness.example.com
+```
+
+الـstack ينشر `https://harness.example.com/?token=…` في `~/dsh-url.txt` على كل
+إقلاع، بنفس العنوان. تحتاج نطاقاً مُداراً على Cloudflare. بديل بلا نطاق:
+Tailscale Funnel — ضع `tailscale funnel --bg 30141` في `tunnel.command` واضبط
+`tunnel.hostname` على اسم الجهاز `*.ts.net`.
+
+---
+
 ## الإعدادات الافتراضية
 
 - الوجهة: `https://opencode.ai/inference/openai/v1` (مفتاح `public`، الطبقة المجانية)
 - المنفذ: `8901`، الاستماع: `127.0.0.1` فقط (`HOST`/`PORT` للتغيير)
 - الـpool: 30–40 lane، فحص حقيقي لكل بروكسي قبل ترقيته
 - `upstream_user_agent`: بصمة OpenCode — بدونها ترفض الطبقة المجانية الطلب
+- `stage2_probe`: `false` — لا يُثبت الـlane بطلب حقيقي (الطبقة المجانية تسمح
+  بنحو طلب واحد لكل IP، والفحص كان يستهلكه)
+- `webshare_token` / `webshare_rotating`: مصدر البروكسيات الحقيقي
 
 كل الحقول في [`config/settings.example.json`](config/settings.example.json).
 
@@ -207,7 +263,7 @@ dsh web :30141 ──OpenAI/chat──▶ opencode-bridge :8902 ──session AP
 ## Repository layout
 
 - `zen-router/rust/` — Rust source (Cargo).
-- `zen-router/bin/zen-relay` — prebuilt Linux x86_64 binary (v1.1.9).
+- `zen-router/bin/zen-relay` — prebuilt Linux x86_64 binary (v1.2.0).
 - `run.sh` — one-command launcher (prebuilt binary or source build).
 - `install.sh`, `stack/`, `config/`, `scripts/`, `docs/` — full relay + tunnel + Harness supervisor stack; see `docs/INSTALL.md`.
 

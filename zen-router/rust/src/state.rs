@@ -137,9 +137,19 @@ pub struct Lane {
     pub probe_tries: u32,
     pub consec_fails: u32,
     pub inflight: u32,
+    /// A rotating lane hands out a fresh exit IP on every connection, so a
+    /// failure says nothing about the *next* attempt: it must not be parked
+    /// for the long cooldown and its address must not be burned.
+    pub rotating: bool,
     pub created: f64,
     pub sem: Option<Arc<Semaphore>>,
     pub cached_client: Option<Arc<reqwest::Client>>,
+}
+
+/// A Webshare rotating entry carries `-rotate` in its username: the gateway
+/// hands out a new exit IP on every new connection.
+pub fn is_rotating_addr(addr: &str) -> bool {
+    addr.contains("-rotate")
 }
 
 impl Lane {
@@ -160,6 +170,7 @@ impl Lane {
             probe_tries: 0,
             consec_fails: 0,
             inflight: 0,
+            rotating: is_rotating_addr(addr),
             created: now(),
             sem: None,
             cached_client: None,
@@ -238,14 +249,18 @@ impl Lane {
 /// future, or a busy dead lane would never be re-tested.
 fn arm_park(ln: &mut Lane, reason: u8, rt: &Runtime, burn: bool) {
     let was_warm = ln.parked_until < now();
-    ln.parked_until = now() + rt.cooldown;
+    // A rotating lane gets a new exit IP on the next connection, so parking
+    // it for the full cooldown would throw away a working gateway. Give it a
+    // short breath instead.
+    let cooldown = if ln.rotating { rt.rotating_cooldown } else { rt.cooldown };
+    ln.parked_until = now() + cooldown;
     ln.park_reason = reason;
     if was_warm {
         ln.parked_at = now();
         logline(&format!(
             "lane {} parked for {:.0}s (burn={}, consec_fails={}, reason={})",
             display_addr(&ln.addr),
-            rt.cooldown,
+            cooldown,
             burn,
             ln.consec_fails,
             if reason == PARK_BREAKS { "stream-breaks" } else { "blocked" }
@@ -666,6 +681,11 @@ impl AppState {
         if !rt.burn_memory || addr.is_empty() {
             return;
         }
+        // A rotating gateway is not an IP: burning it would block the whole
+        // account, and its next connection has a different exit IP anyway.
+        if is_rotating_addr(addr) {
+            return;
+        }
         let ip = ip_of(addr);
         if ip.is_empty() || ip == "127.0.0.1" || ip == "localhost" {
             return;
@@ -949,6 +969,12 @@ impl AppState {
             if let Some(p) = &proxy {
                 b = b.proxy(reqwest::Proxy::all(p).map_err(|e| e.to_string())?);
             }
+            if ln.rotating {
+                // A kept-alive connection would keep the same exit IP, which
+                // defeats the rotation: close every connection so the next
+                // request lands on a new one.
+                b = b.pool_max_idle_per_host(0);
+            }
             let c = b.build().map_err(|e| e.to_string())?;
             ln.cached_client = Some(Arc::new(c.clone()));
             Ok(c)
@@ -979,6 +1005,27 @@ pub struct ChannelStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rotating_gateways_are_recognised_and_rest_briefly() {
+        assert!(is_rotating_addr("user-rotate:pass@p.webshare.io:80"));
+        assert!(is_rotating_addr("user-us-rotate:pass@p.webshare.io:80"));
+        assert!(!is_rotating_addr("user:pass@1.2.3.4:8080"));
+        assert!(!is_rotating_addr("1.2.3.4:1080"));
+
+        let mut ln = Lane::new("user-rotate:pass@p.webshare.io:80", "http");
+        assert!(ln.rotating, "a rotating gateway must be flagged");
+        let rt = crate::config::Settings::default().rt();
+        ln.consec_fails = 3;
+        let mut pool = Pool::default();
+        pool.lanes.insert(ln.key(), ln);
+        pool.mark_fail(&pool.lanes.keys().next().unwrap().clone(), true, &rt);
+        let parked = pool.lanes.values().next().unwrap().parked_until;
+        assert!(
+            parked - now() <= 6.0,
+            "a rotating lane must rest briefly, not for an hour (parked {parked})"
+        );
+    }
 
     #[test]
     fn redacts_proxy_credentials_but_keeps_host() {

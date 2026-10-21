@@ -105,9 +105,17 @@ export function defaults(env = process.env) {
     },
 
     tunnel: {
-      /** `own` runs cloudflared; `external` leaves it to another unit; `off` disables it. */
+      /**
+       * `own` runs a Cloudflare quick tunnel (a new hostname at every boot);
+       * `named` runs a named tunnel with a fixed hostname; `external` leaves it
+       * to another unit; `off` disables it.
+       */
       mode: 'own',
       command: [cloudflaredBin, 'tunnel', '--url', 'http://127.0.0.1:30141', '--no-autoupdate'],
+      /** The command that runs a named tunnel, e.g. `cloudflared tunnel run <name>`. */
+      namedCommand: [],
+      /** The public hostname of a named tunnel (known before it starts). */
+      hostname: '',
       /** Restart the Harness with `--trusted-host` when the quick-tunnel hostname appears. */
       publishUrl: true,
       readyTimeoutMs: 90_000,
