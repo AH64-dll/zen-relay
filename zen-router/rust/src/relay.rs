@@ -109,6 +109,24 @@ pub fn build_upstream_headers(st: &AppState, rt: &Runtime, client_ua: Option<&st
     h
 }
 
+/// Flatten an error and its causes into one line: the outer message alone
+/// ("error sending request for url") hides the part that matters.
+pub fn error_chain(err: &dyn std::error::Error) -> String {
+    let mut out = err.to_string();
+    let mut source = err.source();
+    let mut depth = 0;
+    while let Some(inner) = source {
+        if depth > 4 {
+            break;
+        }
+        out.push_str(" <- ");
+        out.push_str(&inner.to_string());
+        source = inner.source();
+        depth += 1;
+    }
+    out
+}
+
 // ── quota / block classification ───────────────────────────────────
 pub fn is_quota_429(body: &[u8], status: u16) -> bool {
     if status != 429 {
@@ -414,10 +432,14 @@ pub async fn attempt(
             .ok_or_else(|| "lane gone".to_string())?
             .proxy_url()
     };
+    // The connect budget must match the probe's patience (25 s) closely
+    // enough: a one-second connect timeout killed every slow proxy before it
+    // could tunnel the request, so lanes that had just passed the probe failed
+    // instantly on the real request.
     let mut b = reqwest::Client::builder()
         .no_proxy()
-        .connect_timeout(Duration::from_secs(1))
-        .timeout(Duration::from_secs_f64(timeout.min(15.0)));
+        .connect_timeout(Duration::from_secs_f64(timeout.min(15.0)))
+        .timeout(Duration::from_secs_f64(timeout));
     if let Some(p) = &proxy {
         b = b.proxy(reqwest::Proxy::all(p).map_err(|e| e.to_string())?);
     }
@@ -430,7 +452,7 @@ pub async fn attempt(
         .json(payload)
         .send()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| error_chain(&e))?;
     let status = resp.status().as_u16();
     let resp_headers = resp.headers().clone();
     let body = resp.bytes().await.map_err(|e| e.to_string())?;
@@ -630,7 +652,12 @@ pub async fn relay_nonstream(
                 st.pool.lock().unwrap().mark_fail(&key, false, &rt);
                 st.stats.lane_failures.fetch_add(1, Ordering::Relaxed);
                 st.stats.failovers.fetch_add(1, Ordering::Relaxed);
-                last_err = Some((-1, Bytes::from(e)));
+                last_err = Some((-1, Bytes::from(e.clone())));
+                logline(&format!(
+                    "lane {} failed in transport: {err}",
+                    display_addr(&lane_addr(st, &key)),
+                    err = e
+                ));
                 if now() > deadline {
                     break;
                 }

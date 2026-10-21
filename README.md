@@ -1,10 +1,10 @@
-# zen-relay — Relay + Harness stack (Zen Relay 1.1.8)
+# zen-relay — Relay + Harness stack (Zen Relay 1.1.9)
 
 مرحّل متوافق مع OpenAI API يوزّع الطلبات على عناوين خروج متغيرة (rotating egress
 IPs) لتفادي حدود المعدل المفروضة لكل IP، مع حزمة تشغيل كاملة تربطه بـDeepSeek
 Harness وتنشره على نفق HTTPS.
 
-**النسخة الحالية: 1.1.8** · المصدر: `zen-router/rust/` · الملف التنفيذي:
+**النسخة الحالية: 1.1.9** · المصدر: `zen-router/rust/` · الملف التنفيذي:
 `zen-router/bin/zen-relay`.
 
 ---
@@ -95,6 +95,11 @@ PORT=8901 HOST=127.0.0.1 ./run.sh
   رغم سلامة المرحّل. هذا قيد من المزوّد لا خلل في المرحّل؛ الحل هو الجسر أعلاه
   (يمرّ الطلب من عميل OpenCode نفسه) أو مفتاح OpenCode صالح أو مزوّد آخر. راجع
   `docs/TROUBLESHOOTING.md`.
+- **السماح لكل IP (1.1.9):** الطبقة المجانية تسمح بنحو **طلب واحد لكل IP**. كان
+  المرحّل يثبت كل lane بطلب حقيقي، فيستهلك الرصيد الذي يُفترض أن يخدمه الطلب
+  الحقيقي. لذلك `stage2_probe` (مضبوط على `false` في `config/settings.example.json`)
+  يرقّي الـlane بعد فحص connectivity رخيص، فيكون طلب العميل هو الأول عبر ذلك IP.
+  `/healthz` يعرض الآن `warm` (lanes قابلة للوصول) و`proven` (lanes نجحت فعلاً).
 
 القيود المعروفة: نفق quick يتغيّر اسمه عند كل تشغيل، مفتاح واحد يصلح أيضاً
 لإدارة `/api/*`، ولا CORS لواجهات المتصفح. الحلول في نفس المستند.
@@ -202,7 +207,7 @@ dsh web :30141 ──OpenAI/chat──▶ opencode-bridge :8902 ──session AP
 ## Repository layout
 
 - `zen-router/rust/` — Rust source (Cargo).
-- `zen-router/bin/zen-relay` — prebuilt Linux x86_64 binary (v1.1.8).
+- `zen-router/bin/zen-relay` — prebuilt Linux x86_64 binary (v1.1.9).
 - `run.sh` — one-command launcher (prebuilt binary or source build).
 - `install.sh`, `stack/`, `config/`, `scripts/`, `docs/` — full relay + tunnel + Harness supervisor stack; see `docs/INSTALL.md`.
 
