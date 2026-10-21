@@ -18,7 +18,7 @@ Harness وتنشره على نفق HTTPS.
 | `run.sh` | تشغيل بأمر واحد (تنفيذي جاهز أو بناء من المصدر) |
 | `install.sh` | تثبيت الحزمة كاملة: مرحّل + نفق + Harness |
 | `stack/` | مشرف `dsh-stack` + plugin استئناف الجلسات `session-keeper` |
-| `config/` | إعدادات نموذجية: `settings.example.json`، وحدة systemd، وربط dsh |
+| `config/` | إعدادات نموذجية: `settings.example.json`، وحدة systemd، وربط dsh، وCaddyfile |
 | `scripts/expose-relay.sh` | نشر المرحّل على نفق Cloudflare وطباعة العنوان والمفتاح |
 | `docs/` | المعمارية، التشغيل على أجهزة أخرى، التثبيت، استكشاف الأخطاء |
 

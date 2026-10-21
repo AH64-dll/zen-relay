@@ -6,6 +6,11 @@ ready before anything depends on them, are restarted when they crash or wedge, a
 **sessions that were interrupted by a crash resume themselves** once the stack is
 back up.
 
+> Paths such as `/home/ai/Music/dsh-stack` and `~/.omp/zen-router` below are the
+> machine this was built on. `install.sh` discovers the real paths and rewrites
+> the unit; nothing here needs editing by hand. Node.js **22+** is required
+> (zstd in `node:zlib`).
+
 ```
                          systemd (user manager, linger enabled)
                                         │  Type=notify, WatchdogSec=90

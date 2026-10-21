@@ -128,6 +128,20 @@ sudo ufw allow from 192.168.0.0/24 to any port 8901 proto tcp
 | لا TLS في المرحّل نفسه | `HOST=0.0.0.0` مكشوف نصّاً | استخدم النفق أو reverse proxy بـTLS |
 | لا حدّ معدّل لكل عميل | جهاز واحد يمكنه استهلاك الـpool كله | حدّد `lane_max_inflight` و`proxy_pool_target`، أو reverse proxy بحدود |
 
+### واجهات المتصفح وCORS + حماية `/api`
+
+المرحّل لا يرسل ترويسات CORS ولا يجيب على `OPTIONS`؛ أي واجهة ويب تعمل من أصل
+مختلف ستفشل في المتصفح. كما أن المفتاح نفسه يفتح `/api/*`. الحل الجاهز في
+[`config/Caddyfile.example`](../config/Caddyfile.example): يضيف CORS، يجيب
+preflight، ويحجب `/api/*` عن الأجهزة البعيدة، مع TLS تلقائي.
+
+```bash
+caddy run --config config/Caddyfile.example   # بعد تعديل النطاق
+```
+
+بديل بلا Caddy: حجب `/api/*` في إعداد نفق مُسمّى، أو استخدم عميلاً غير متصفح
+(SDK / Harness) فلا تحتاج CORS أصلاً.
+
 ### نطاق ثابت (بدل quick tunnel)
 
 أنشئ نفقاً مُسمّى مرة واحدة:
