@@ -1,6 +1,6 @@
 {
   "name": "dsh-stack",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "type": "module",
   "description": "Boot orchestration and supervision for the DeepSeek Harness: starts the model proxy, the tunnel and the Harness in dependency order, proves each one ready, and heals them.",

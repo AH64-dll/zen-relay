@@ -10,6 +10,7 @@
 | `GLIBC_2.34 not found` | توزيعة قديمة | ابنِ من المصدر: `cargo build --release` |
 | `Address already in use` | عملية أخرى على 8901 | `ss -lntp \| grep 8901`؛ أوقف `zen-rotator` إن كان `dsh-stack` يدير المرحّل |
 | لا يبدأ `dsh-stack` | `journalctl --user -u dsh-stack -n 80` | غالباً المرحّل غير جاهز: `proxy-not-ready` في `~/.local/state/dsh-stack/stack.log` |
+| `spawn ... ENOENT` والمرحّل `stopped` | `node stack/bin/dsh-stack doctor` | `proxy.cwd` يشير إلى `~/.omp/zen-router` غير الموجود؛ أعد `./install.sh` ليضبطه على `zen-router/` داخل المستودع |
 | الواجهة تعمل بلا نماذج | `curl localhost:8901/healthz` | المسار ميت؛ أعد تشغيل الحزمة، وتحقق من `cordis.patch.yml` |
 | نفقان معاً / تقلّب الرابط | `pgrep -af cloudflared` | عطّل الوحدة القديمة: `systemctl --user disable --now cloudflared-tunnel` |
 | أجهزة أخرى تُحجب في المتصفح | لا CORS | استخدم عميلاً غير متصفح أو reverse proxy يضيف CORS |

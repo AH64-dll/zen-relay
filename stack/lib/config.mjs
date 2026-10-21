@@ -15,6 +15,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 /** Resolve an executable through `PATH` (used to pin absolute paths in config). */
 function findExecutable(name, env) {
@@ -39,7 +40,12 @@ export function defaults(env = process.env) {
   const relayDefault = path.join(home, '.omp', 'zen-router', 'rust', 'target', 'release', 'zen-relay');
   // The checkout layout is `zen-relay/zen-router/bin/zen-relay`; stack/ lives
   // next to it. Try the shipped binary first, then a source build, then PATH.
-  const repoRoot = path.dirname(path.dirname(path.dirname(new URL(import.meta.url).pathname)));
+  const repoRoot = path.dirname(path.dirname(path.dirname(fileURLToPath(import.meta.url))));
+  const checkoutRelayDir = path.join(repoRoot, 'zen-router');
+  // Running from a checkout means the relay, its settings and its pool state
+  // live in that checkout. Only a bare install without one falls back to the
+  // historical ~/.omp location.
+  const relayDir = fs.existsSync(checkoutRelayDir) ? checkoutRelayDir : path.join(home, '.omp', 'zen-router');
   const relayCandidates = [
     path.join(repoRoot, 'zen-router', 'bin', 'zen-relay'),
     path.join(repoRoot, 'zen-router', 'rust', 'target', 'release', 'zen-relay'),
@@ -61,7 +67,7 @@ export function defaults(env = process.env) {
     /** Human label used in logs and status. */
     name: 'dsh-stack',
     /** Absolute path to this installation, filled in by the installer. */
-    installDir: path.dirname(path.dirname(new URL(import.meta.url).pathname)),
+    installDir: path.dirname(path.dirname(fileURLToPath(import.meta.url))),
     configFile,
     stateDir,
     /** The dsh home the Harness uses (sessions, profiles, credentials). */
@@ -84,12 +90,12 @@ export function defaults(env = process.env) {
       /** `own` spawns and supervises the process here; `external` only probes it. */
       mode: 'own',
       command: [relayBin],
-      cwd: path.join(home, '.omp', 'zen-router'),
+      cwd: relayDir,
       env: {
         PORT: '8901',
-        SETTINGS_FILE: path.join(home, '.omp', 'zen-router', 'settings.json'),
-        LANES_FILE: path.join(home, '.omp', 'zen-router', 'lanes.json'),
-        BURNED_FILE: path.join(home, '.omp', 'zen-router', 'burned.json'),
+        SETTINGS_FILE: path.join(relayDir, 'settings.json'),
+        LANES_FILE: path.join(relayDir, 'lanes.json'),
+        BURNED_FILE: path.join(relayDir, 'burned.json'),
       },
       healthUrl: 'http://127.0.0.1:8901/healthz',
       /** A `2xx` body containing `"ok":true` counts as ready. */
