@@ -7,6 +7,8 @@
 | `530` من Cloudflare | النفق مقطوع عن الأصل | `systemctl --user restart dsh-stack` (يعيد النفق ويولّد اسماً جديداً) |
 | الرابط القديم يعطي `000` | اسم quick tunnel تغيّر | خذ الاسم الحالي من `~/dsh-url.txt`؛ أو انقل إلى named tunnel |
 | `503 zen_lane_blocked` متكرر | الـpool بارد أو محروق | انتظر دقيقة؛ `curl /healthz` ثم `/api/pool`؛ أو `/api/refresh` |
+| `warm` أكبر من صفر لكن `proven: 0` | `curl /healthz` | الـlanes قابلة للوصول لكنها لم تنجح في طلب واحد بعد؛ البوابة تعطي كل IP رصيد طلب واحد، و`stage2_probe: false` يمنع الفحص من استهلاكه |
+| `403 quota` من المزوّد عبر كل الـlanes | `/api/pool` ثم `/api/burned` | كل IP في الدور استُهلك رصيده (منك أو من غيرك)؛ المرحّل يبدّل الـIP تلقائياً، لكن رصيد IP واحد = طلب واحد |
 | `FreeTierError` من المزوّد أو `warm=0` دائم | اطلب `inference/openai/v1` مباشرة بلا بروكسي | المزوّد يقيّد الطبقة المجانية على عميل OpenCode الرسمي؛ استخدم الجسر (`opencode-bridge` على منفذ `8902`) فيمرّ الطلب من OpenCode نفسه، أو مفتاح OpenCode صالح أو مزوّد آخر |
 | `GLIBC_2.34 not found` | توزيعة قديمة | ابنِ من المصدر: `cargo build --release` |
 | `Address already in use` | عملية أخرى على 8901 | `ss -lntp \| grep 8901`؛ أوقف `zen-rotator` إن كان `dsh-stack` يدير المرحّل |

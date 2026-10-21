@@ -478,8 +478,14 @@ impl Pool {
             .map(|ln| ln.subnet())
             .collect();
         let inflight: u64 = self.lanes.values().map(|ln| ln.inflight as u64).sum();
+        // "warm" counts lanes that are reachable; "proven" counts the ones that
+        // have actually served a completion. With `stage2_probe` off the two
+        // differ on purpose: a lane promoted by the screen check is a
+        // candidate, not a guarantee.
+        let proven = self.lanes.values().filter(|ln| ln.ok > 0).count();
         json!({
             "warm": warm.len(),
+            "proven": proven,
             "parked": self.parked_keys().len(),
             "queue": self.queue_len(),
             "sources_ok": self.sources_ok,

@@ -440,6 +440,22 @@ pub async fn probe_candidate(st: &AppState, key: &str) -> Option<Lane> {
             .insert(key.to_string(), "proxy".into());
         return None;
     }
+    if !rt.stage2_probe {
+        // Screen-only promotion: the proxy can reach the upstream, but we do
+        // not spend a completion to prove it. The provider's free tier allows
+        // roughly one completion per egress IP, so a completion probe would
+        // burn the allowance the lane exists to serve — the client's first
+        // request would then find the IP spent. The lane starts unproven
+        // (`ok = 0`); the first request that succeeds proves it.
+        let mut ln = Lane::new(addr, proto);
+        ln.ok = 0;
+        ln.last_ok = 0.0;
+        ln.lat_ms = 0.0;
+        ln.score = 0.5;
+        st.stats.probes_ok.fetch_add(1, Ordering::Relaxed);
+        logline(&format!("prober: +lane {} passed screen (no completion probe)", display_addr(addr)));
+        return Some(ln);
+    }
     match stage2(st, &rt, proto, addr).await {
         Err(kind) => {
             st.probe_err

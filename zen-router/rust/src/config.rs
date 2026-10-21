@@ -39,7 +39,7 @@ pub fn restrict_permissions(path: &Path) {
     let _ = path;
 }
 
-pub const VERSION: &str = "1.1.8";
+pub const VERSION: &str = "1.1.9";
 pub const DEFAULT_UA: &str = "opencode/latest/2.0.32/cli";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -50,6 +50,15 @@ pub struct Settings {
     pub upstream_api_key: String,
     pub relay_api_key: String,
     pub probe_model: String,
+    /// Probe a lane with a real completion before promoting it.
+    ///
+    /// The provider's free tier allows roughly one completion per egress IP.
+    /// A completion probe therefore *spends* the very allowance the lane is
+    /// meant to serve, and the client's first real request then finds the IP
+    /// already spent. With this off, a lane is promoted after the cheap
+    /// screen check (the proxy can reach the upstream) and the client's own
+    /// request is the first one through that IP.
+    pub stage2_probe: bool,
     pub proxy_pool_target: u64,
     pub proxy_max_candidates: u64,
     pub proxy_test_concurrency: u64,
@@ -83,6 +92,7 @@ impl Default for Settings {
             upstream_api_key: "public".into(),
             relay_api_key: String::new(),
             probe_model: "beam-free".into(),
+            stage2_probe: true,
             proxy_pool_target: 30,
             proxy_max_candidates: 3000,
             proxy_test_concurrency: 60,
@@ -118,6 +128,7 @@ pub struct Runtime {
     pub api_keys: Vec<String>,
     pub relay_key: String,
     pub probe_model: String,
+    pub stage2_probe: bool,
     pub ua: String,
     pub pool_target: usize,
     pub max_candidates: usize,
@@ -164,6 +175,7 @@ impl Settings {
             api_keys: if raw_keys.is_empty() { vec!["public".into()] } else { raw_keys },
             relay_key: self.relay_api_key.trim().to_string(),
             probe_model: self.probe_model.clone(),
+            stage2_probe: self.stage2_probe,
             ua,
             pool_target: (self.proxy_pool_target.max(1)) as usize,
             max_candidates: (self.proxy_max_candidates.max(10)) as usize,
@@ -229,6 +241,7 @@ impl Settings {
             "upstream_api_key" => text!(upstream_api_key),
             "relay_api_key" => text!(relay_api_key),
             "probe_model" => text!(probe_model),
+            "stage2_probe" => boolean!(stage2_probe),
             "proxy_pool_target" => num!(proxy_pool_target),
             "proxy_max_candidates" => num!(proxy_max_candidates),
             "proxy_test_concurrency" => num!(proxy_test_concurrency),
@@ -327,6 +340,7 @@ impl Settings {
     /// Keys the API may update; masked secrets are skipped by the caller.
     pub const KEYS: &'static [&'static str] = &[
         "upstream_base_url", "screen_url", "upstream_api_key", "relay_api_key", "probe_model",
+        "stage2_probe",
         "proxy_pool_target", "proxy_max_candidates", "proxy_test_concurrency",
         "proxy_probe_timeout", "relay_proxy_timeout", "relay_attempts",
         "lane_cooldown_sec", "lane_recover_sec", "direct_lane", "webshare_token",
@@ -344,6 +358,7 @@ impl Settings {
             ("UPSTREAM_API_KEY", "upstream_api_key"),
             ("RELAY_API_KEY", "relay_api_key"),
             ("PROBE_MODEL", "probe_model"),
+            ("STAGE2_PROBE", "stage2_probe"),
             ("PROXY_POOL_TARGET", "proxy_pool_target"),
             ("PROXY_MAX_CANDIDATES", "proxy_max_candidates"),
             ("PROXY_TEST_CONCURRENCY", "proxy_test_concurrency"),
@@ -429,6 +444,7 @@ impl Settings {
             "upstream_api_key": Value::Array(keys),
             "relay_api_key": mask(&self.relay_api_key),
             "probe_model": self.probe_model,
+            "stage2_probe": self.stage2_probe,
             "proxy_pool_target": self.proxy_pool_target,
             "proxy_max_candidates": self.proxy_max_candidates,
             "proxy_test_concurrency": self.proxy_test_concurrency,
@@ -479,8 +495,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rejects_empty_relay_key() {
-        let mut s = Settings::default();
+    fn rejects_empty_relay_key() {        let mut s = Settings::default();
         let err = s
             .validate_and_set("relay_api_key", &json!(""))
             .unwrap_err();
@@ -489,6 +504,22 @@ mod tests {
         assert!(s.validate_and_set("relay_api_key", &json!("   ")).is_err());
         assert!(s.validate_and_set("relay_api_key", &json!("rly_abc")).is_ok());
         assert_eq!(s.relay_api_key, "rly_abc");
+    }
+
+    #[test]
+    fn stage2_probe_is_off_by_default_in_the_example_but_on_in_the_binary() {
+        // The binary keeps the upstream behaviour (a lane is proven with a
+        // real completion) unless the operator turns it off: the provider's
+        // free tier allows roughly one completion per egress IP, so a probe
+        // spends the allowance the lane exists to serve.
+        let mut s = Settings::default();
+        assert!(s.stage2_probe, "the default keeps the original probing");
+        s.validate_and_set("stage2_probe", &json!(false)).unwrap();
+        assert!(!s.stage2_probe);
+        s.validate_and_set("stage2_probe", &json!("false")).unwrap();
+        assert!(!s.stage2_probe, "a string flag must parse like a boolean");
+        s.validate_and_set("stage2_probe", &json!(true)).unwrap();
+        assert!(s.stage2_probe);
     }
 
     #[test]

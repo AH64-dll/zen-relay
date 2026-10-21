@@ -4,6 +4,7 @@
   "upstream_api_key": "public",
   "relay_api_key": "",
   "probe_model": "beam-free",
+  "stage2_probe": false,
   "proxy_pool_target": 40,
   "proxy_max_candidates": 1500,
   "proxy_test_concurrency": 30,
