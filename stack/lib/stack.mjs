@@ -238,7 +238,7 @@ export class Stack {
       }
 
       // 2. Tunnel — optional; a failure degrades the public URL, never the boot.
-      if (config.tunnel.mode === 'own') {
+      if (config.tunnel.mode === 'own' || config.tunnel.mode === 'named') {
         const tunnelReady = await this.converge('tunnel');
         if (!tunnelReady) this.logger.warn('tunnel-not-ready', { why: options.why });
       } else if (config.tunnel.mode === 'off') {
@@ -319,7 +319,15 @@ export class Stack {
         probe: () => this.proxyProbe({ liveness: true }),
       });
     }
-    if (config.tunnel.mode === 'own' && this.components.tunnel === undefined) {
+    if (config.tunnel.mode === 'named' && this.components.tunnel === undefined) {
+      // A named tunnel has a fixed hostname: no need to wait for one to
+      // appear in the child's output.
+      const host = config.tunnel.hostname;
+      if (typeof host === 'string' && host.length > 0 && this.tunnel.host !== host) {
+        this.tunnel = { host, url: `https://${host}/`, seenAt: Date.now() };
+      }
+    }
+    if ((config.tunnel.mode === 'own' || config.tunnel.mode === 'named') && this.components.tunnel === undefined) {
       this.components.tunnel = new Component({
         name: 'tunnel',
         command: this.tunnelCommand(),
@@ -330,7 +338,7 @@ export class Stack {
         onLine: (line) => this.observeTunnelLine(line),
         ready: async () => {
           if (this.tunnel.host !== undefined) return { ok: true, detail: `tunnel host ${this.tunnel.host}` };
-          return { ok: false, detail: 'waiting for a trycloudflare hostname' };
+          return { ok: false, detail: 'waiting for a tunnel hostname' };
         },
         probe: async () => {
           if (this.tunnel.host === undefined) return { ok: false, detail: 'no hostname yet' };
@@ -533,7 +541,7 @@ export class Stack {
 
   /** The host the Harness should trust, when the tunnel provides one. */
   tunnelTargetHost() {
-    if (this.config.tunnel.mode !== 'own') return undefined;
+    if (this.config.tunnel.mode !== 'own' && this.config.tunnel.mode !== 'named') return undefined;
     return this.tunnel.host;
   }
 
@@ -555,6 +563,11 @@ export class Stack {
   }
 
   tunnelCommand() {
+    if (this.config.tunnel.mode === 'named') {
+      const named = [...(this.config.tunnel.namedCommand ?? [])];
+      if (named.length === 0) return ['/bin/false'];
+      return named;
+    }
     const argv = [...this.config.tunnel.command];
     const index = argv.findIndex((value) => value.startsWith('http://127.0.0.1'));
     if (index >= 0) argv[index] = `http://127.0.0.1:${this.config.harness.port}`;

@@ -39,7 +39,7 @@ pub fn restrict_permissions(path: &Path) {
     let _ = path;
 }
 
-pub const VERSION: &str = "1.1.9";
+pub const VERSION: &str = "1.2.0";
 pub const DEFAULT_UA: &str = "opencode/latest/2.0.32/cli";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -69,6 +69,13 @@ pub struct Settings {
     pub lane_recover_sec: u64,
     pub direct_lane: bool,
     pub webshare_token: String,
+    /// Add the Webshare *backbone* rotating entry: the gateway hands out a
+    /// fresh residential exit IP on every new connection.
+    pub webshare_rotating: bool,
+    /// Optional country code for the rotating entry (e.g. "us").
+    pub webshare_country: String,
+    /// How long a failed rotating lane rests before it is tried again.
+    pub rotating_cooldown_sec: u64,
     pub sources_enabled: bool,
     pub allow_socks: bool,
     pub lane_max_inflight: u64,
@@ -103,6 +110,9 @@ impl Default for Settings {
             lane_recover_sec: 3600,
             direct_lane: true,
             webshare_token: String::new(),
+            webshare_rotating: false,
+            webshare_country: String::new(),
+            rotating_cooldown_sec: 5,
             sources_enabled: true,
             allow_socks: true,
             lane_max_inflight: 2,
@@ -148,6 +158,10 @@ pub struct Runtime {
     pub allow_socks: bool,
     pub direct: bool,
     pub webshare: String,
+    pub webshare_rotating: bool,
+    pub webshare_country: String,
+    /// Rest period for a failed rotating lane (seconds).
+    pub rotating_cooldown: f64,
     pub sources: bool,
 }
 
@@ -195,6 +209,9 @@ impl Settings {
             allow_socks: self.allow_socks,
             direct: self.direct_lane,
             webshare: self.webshare_token.trim().to_string(),
+            webshare_rotating: self.webshare_rotating,
+            webshare_country: self.webshare_country.trim().to_lowercase(),
+            rotating_cooldown: self.rotating_cooldown_sec.max(0) as f64,
             sources: self.sources_enabled,
         }
     }
@@ -242,6 +259,9 @@ impl Settings {
             "relay_api_key" => text!(relay_api_key),
             "probe_model" => text!(probe_model),
             "stage2_probe" => boolean!(stage2_probe),
+            "webshare_rotating" => boolean!(webshare_rotating),
+            "webshare_country" => text!(webshare_country),
+            "rotating_cooldown_sec" => num!(rotating_cooldown_sec),
             "proxy_pool_target" => num!(proxy_pool_target),
             "proxy_max_candidates" => num!(proxy_max_candidates),
             "proxy_test_concurrency" => num!(proxy_test_concurrency),
@@ -340,7 +360,7 @@ impl Settings {
     /// Keys the API may update; masked secrets are skipped by the caller.
     pub const KEYS: &'static [&'static str] = &[
         "upstream_base_url", "screen_url", "upstream_api_key", "relay_api_key", "probe_model",
-        "stage2_probe",
+        "stage2_probe", "webshare_rotating", "webshare_country", "rotating_cooldown_sec",
         "proxy_pool_target", "proxy_max_candidates", "proxy_test_concurrency",
         "proxy_probe_timeout", "relay_proxy_timeout", "relay_attempts",
         "lane_cooldown_sec", "lane_recover_sec", "direct_lane", "webshare_token",
@@ -369,6 +389,9 @@ impl Settings {
             ("LANE_RECOVER_SEC", "lane_recover_sec"),
             ("DIRECT_LANE", "direct_lane"),
             ("WEBSHARE_TOKEN", "webshare_token"),
+            ("WEBSHARE_ROTATING", "webshare_rotating"),
+            ("WEBSHARE_COUNTRY", "webshare_country"),
+            ("ROTATING_COOLDOWN_SEC", "rotating_cooldown_sec"),
             ("SOURCES_ENABLED", "sources_enabled"),
             ("ALLOW_SOCKS", "allow_socks"),
             ("LANE_MAX_INFLIGHT", "lane_max_inflight"),
@@ -445,6 +468,8 @@ impl Settings {
             "relay_api_key": mask(&self.relay_api_key),
             "probe_model": self.probe_model,
             "stage2_probe": self.stage2_probe,
+            "webshare_rotating": self.webshare_rotating,
+            "webshare_country": self.webshare_country,
             "proxy_pool_target": self.proxy_pool_target,
             "proxy_max_candidates": self.proxy_max_candidates,
             "proxy_test_concurrency": self.proxy_test_concurrency,

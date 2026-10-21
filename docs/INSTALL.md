@@ -97,6 +97,27 @@ systemctl --user daemon-reload
 systemctl --user restart dsh-stack
 ```
 
+## 3.5 مصدر البروكسيات (Webshare)
+
+قوائم البروكسيات المجانية العامة شبه معطّلة (قياس: 300 عيّنة عشوائية، صفر
+تصل إلى المزوّد). للحصول على عناوين سكنية حقيقية:
+
+```bash
+scripts/set-webshare-token.sh                 # 10 عناوين مجانية
+scripts/set-webshare-token.sh --rotating      # عنوان جديد مع كل طلب
+```
+
+يرفض الرمز المفتاحَ في `zen-router/settings.json` (صلاحية `0600`).
+
+## 3.6 نفق ثابت بدل النفق السريع
+
+```bash
+cloudflared tunnel login
+cloudflared tunnel create zen-harness
+cloudflared tunnel route dns zen-harness harness.example.com
+./install.sh --named-tunnel zen-harness --tunnel-hostname harness.example.com
+```
+
 ## 4. التحقق
 
 ```bash

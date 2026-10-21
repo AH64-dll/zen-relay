@@ -210,7 +210,15 @@ pub async fn fetch_sources(st: &AppState) {
                 .send()
                 .await
             {
-                if resp.status().as_u16() == 200 {
+                let status = resp.status().as_u16();
+                if status != 200 {
+                    // A wrong or expired token must not look like "no proxies
+                    // today": say so, loudly, once per scan.
+                    logline(&format!(
+                        "webshare: the API answered HTTP {status} — check the token"
+                    ));
+                }
+                if status == 200 {
                     ok += 1;
                     let body = resp.text().await.unwrap_or_default();
                     if let Ok(d) = serde_json::from_str::<Value>(&body) {
@@ -234,6 +242,19 @@ pub async fn fetch_sources(st: &AppState) {
                                 format!("{ip}:{port}")
                             };
                             webshare_entries.push(addr);
+                            // The backbone gateway hands out a fresh exit IP on
+                            // every new connection when the username carries
+                            // "-rotate"; the country code targets the exit.
+                            if rt.webshare_rotating && !user.is_empty() && !pw.is_empty() {
+                                let country = if rt.webshare_country.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!("-{}", rt.webshare_country)
+                                };
+                                webshare_entries.push(format!(
+                                    "{user}{country}-rotate:{pw}@p.webshare.io:80"
+                                ));
+                            }
                         }
                     }
                 }

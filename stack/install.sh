@@ -17,7 +17,8 @@
 #
 # Usage:
 #   ./install.sh [--dry-run] [--no-start] [--keep-legacy] [--no-tunnel]
-#                [--no-bridge] [--force] [--wait] [--uninstall [--purge]]
+#                [--no-bridge] [--named-tunnel <name>] [--tunnel-hostname <host>]
+#                [--force] [--wait] [--uninstall [--purge]]
 #
 set -euo pipefail
 
@@ -36,6 +37,8 @@ LEGACY_RECORD=$STATE_DIR/legacy-units.json
 LEGACY_UNITS=(dsh-harness.service zen-rotator.service zen-relay.service cloudflared-tunnel.service)
 
 DRY_RUN=0
+NAMED_TUNNEL=''
+TUNNEL_HOSTNAME=''
 KEEP_LEGACY=0
 START=1
 TUNNEL=own
@@ -84,6 +87,8 @@ while [[ $# -gt 0 ]]; do
     --keep-legacy) KEEP_LEGACY=1 ;;
     --no-tunnel) TUNNEL=off ;;
     --no-bridge) BRIDGE=0 ;;
+    --named-tunnel) NAMED_TUNNEL="${2:-}"; shift ;;
+    --tunnel-hostname) TUNNEL_HOSTNAME="${2:-}"; shift ;;
     --force) FORCE=1 ;;
     --wait) WAIT=1 ;;
     --uninstall) UNINSTALL=1 ;;
@@ -132,6 +137,13 @@ preflight() {
 
   CLOUDFLARED_BIN=$(command -v cloudflared || true)
   [[ -n $CLOUDFLARED_BIN ]] && say "cloudflared $CLOUDFLARED_BIN" || warn "cloudflared not found; the public URL will be skipped"
+
+  if [[ -n $NAMED_TUNNEL ]]; then
+    TUNNEL=named
+    [[ -n $CLOUDFLARED_BIN ]] || die "cloudflared is required for a named tunnel"
+    NAMED_TUNNEL_COMMAND="$CLOUDFLARED_BIN tunnel run $NAMED_TUNNEL"
+    say "tunnel      named: $NAMED_TUNNEL (hostname ${TUNNEL_HOSTNAME:-<set in the config>})"
+  fi
 
   # The bridge puts the Harness in front of a local OpenCode server, so the
   # models OpenCode is allowed to use reach the Harness as well.
@@ -192,6 +204,7 @@ write_config() {
   ROOT="$ROOT" CONFIG_FILE="$CONFIG_FILE" DSH_BIN="$DSH_BIN" RELAY_BIN="${RELAY_BIN:-}" \
   PROXY_DIR="${PROXY_DIR:-}" CLOUDFLARED_BIN="${CLOUDFLARED_BIN:-}" TUNNEL_MODE="$TUNNEL" \
   BRIDGE_MODE="$BRIDGE_MODE" OPENCODE_BIN="${OPENCODE_BIN:-}" OPENCODE_URL="${OPENCODE_URL:-}" \
+  NAMED_TUNNEL_COMMAND="${NAMED_TUNNEL_COMMAND:-}" TUNNEL_HOSTNAME="${TUNNEL_HOSTNAME:-}" \
   node --input-type=module -e '
     import fs from "node:fs";
     const { defaults, merge, toInstallDocument } = await import(
@@ -245,6 +258,13 @@ write_config() {
     }
     // An explicit --no-tunnel must win over an older config file.
     next.tunnel.mode = process.env.TUNNEL_MODE;
+    // A named tunnel has a fixed hostname: keep it across reinstalls.
+    if (process.env.TUNNEL_MODE === "named") {
+      next.tunnel.namedCommand = process.env.NAMED_TUNNEL_COMMAND
+        ? process.env.NAMED_TUNNEL_COMMAND.split(" ").filter((p) => p.length > 0)
+        : next.tunnel.namedCommand;
+      if (process.env.TUNNEL_HOSTNAME) next.tunnel.hostname = process.env.TUNNEL_HOSTNAME;
+    }
     // The bridge is the OpenAI-compatible front end for a local OpenCode
     // server. Its mode is decided by the installer, not by an old config.
     next.bridge = {
