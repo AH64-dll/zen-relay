@@ -54,6 +54,14 @@ export function defaults(env = process.env) {
   const relayBin = relayCandidates.find((candidate) => fs.existsSync(candidate))
     ?? findExecutable('zen-relay', env)
     ?? relayDefault;
+  // Settings and lane state belong next to the checkout's zen-router/ when the
+  // relay comes from this repository; keep the historical ~/.omp layout for an
+  // installed binary that lives elsewhere.
+  const repoZenRouter = path.join(repoRoot, 'zen-router');
+  const relayCwd = relayBin === path.join(repoZenRouter, 'bin', 'zen-relay')
+    || relayBin === path.join(repoZenRouter, 'rust', 'target', 'release', 'zen-relay')
+    ? repoZenRouter
+    : path.join(home, '.omp', 'zen-router');
   const cloudflaredBin = findExecutable('cloudflared', env) ?? '/usr/local/bin/cloudflared';
   const dshBin = findExecutable('dsh', env) ?? path.join(nodeBin, 'dsh');
   const stateDir = env.DSH_STACK_STATE_DIR && env.DSH_STACK_STATE_DIR.length > 0

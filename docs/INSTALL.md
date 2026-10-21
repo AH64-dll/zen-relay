@@ -91,6 +91,9 @@ EOF
 systemctl --user daemon-reload
 ```
 
+أو اكتبه في `~/.dsh/.credentials.yaml` تحت `refs:` ثم `chmod 600` عليه. الطرق
+الثلاث وأسبقيتها في [`SETUP-GUIDE.md`](SETUP-GUIDE.md).
+
 أعد التشغيل:
 
 ```bash
