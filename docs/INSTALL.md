@@ -69,11 +69,23 @@ sudo loginctl enable-linger $(id -un)
 
 ## 3. ربط الـHarness بالمرحّل
 
-انسخ `config/dsh-cordis.patch.yml` إلى `~/.dsh/cordis.patch.yml` ثم ضع المفتاح في
-مخزن الاعتماد (لا في الملف):
+انسخ `config/dsh-cordis.patch.yml` إلى `~/.dsh/cordis.patch.yml` ثم وفّر المفتاح
+باسم `OMP_ZEN_RELAY_KEY` (لا تضعه في الملف). `dsh 0.2.x` لا يوفّر أمر
+`dsh config credentials`؛ استخدم إحدى الطريقتين:
+
+**أ) من الواجهة:** صفحة Models في الـHarness ← خزّن `OMP_ZEN_RELAY_KEY`.
+
+**ب) من الطرفية (مناسب للتثبيت بلا واجهة):**
 
 ```bash
-dsh config credentials set OMP_ZEN_RELAY_KEY rly_...
+install -m 600 /dev/null ~/.config/dsh-stack/relay.env
+printf 'OMP_ZEN_RELAY_KEY=rly_...\n' > ~/.config/dsh-stack/relay.env
+mkdir -p ~/.config/systemd/user/dsh-stack.service.d
+cat > ~/.config/systemd/user/dsh-stack.service.d/10-relay-key.conf <<'EOF'
+[Service]
+EnvironmentFile=%h/.config/dsh-stack/relay.env
+EOF
+systemctl --user daemon-reload
 ```
 
 أعد التشغيل:
