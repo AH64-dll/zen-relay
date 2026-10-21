@@ -59,6 +59,18 @@ pub fn display_addr(addr: &str) -> String {
     }
 }
 
+/// Keep the host:port visible but never echo proxy credentials. Used by the
+/// management API, where `raw_addr` used to hand out `user:pass@host:port`.
+pub fn redact_addr(addr: &str) -> String {
+    match addr.rsplit_once('@') {
+        Some((userinfo, host)) => {
+            let user = userinfo.split(':').next().unwrap_or(userinfo);
+            format!("{user}:***@{host}")
+        }
+        None => addr.to_string(),
+    }
+}
+
 pub fn key_subnet(key: &str) -> String {
     let addr = key.split("://").nth(1).unwrap_or(key);
     let host = addr.rsplit('@').next().unwrap_or(addr).split(':').next().unwrap_or(addr);
@@ -71,7 +83,9 @@ pub fn key_subnet(key: &str) -> String {
 }
 
 pub fn valid_addr(addr: &str) -> bool {
-    let parts: Vec<&str> = addr.split(':').collect();
+    // Proxy URLs may carry `user:pass@` (webshare does); validate the host part.
+    let host = addr.rsplit('@').next().unwrap_or(addr);
+    let parts: Vec<&str> = host.split(':').collect();
     if parts.len() != 2 {
         return false;
     }
@@ -585,7 +599,6 @@ pub struct AppState {
 impl AppState {
     pub fn new(settings: Settings, paths: Paths) -> Arc<AppState> {
         let client = reqwest::Client::builder()
-            .danger_accept_invalid_certs(true)
             .no_proxy()
             .connect_timeout(Duration::from_secs(10))
             .build()
@@ -686,10 +699,7 @@ impl AppState {
         let b = self.burned.lock().unwrap();
         let body = json!({"saved": now(), "ips": b.ips});
         if let Ok(txt) = serde_json::to_string(&body) {
-            let tmp = self.paths.burned.with_extension("json.tmp");
-            if std::fs::write(&tmp, txt).is_ok() {
-                let _ = std::fs::rename(&tmp, &self.paths.burned);
-            }
+            let _ = crate::config::write_private(&self.paths.burned, &txt);
         }
     }
 
@@ -734,10 +744,7 @@ impl AppState {
             .collect();
         let body = json!({"saved": now(), "lanes": keep});
         if let Ok(txt) = serde_json::to_string(&body) {
-            let tmp = self.paths.lanes.with_extension("json.tmp");
-            if std::fs::write(&tmp, txt).is_ok() {
-                let _ = std::fs::rename(&tmp, &self.paths.lanes);
-            }
+            let _ = crate::config::write_private(&self.paths.lanes, &txt);
         }
     }
 
@@ -917,7 +924,7 @@ impl AppState {
         Some(ranked[i % ranked.len()].clone())
     }
 
-    /// Per-lane HTTP client, built once per lane (proxy + insecure TLS).
+    /// Per-lane HTTP client, built once per lane (proxy, TLS verified).
     /// Non-stream attempts are wrapped in a 15s timeout by the caller; the
     /// read timeout here matches the Python 120s streaming window.
     pub fn lane_client(&self, pool: &mut Pool, key: &str) -> Result<reqwest::Client, String> {
@@ -927,7 +934,6 @@ impl AppState {
             }
             let proxy = ln.proxy_url();
             let mut b = reqwest::Client::builder()
-                .danger_accept_invalid_certs(true)
                 .no_proxy()
                 .read_timeout(Duration::from_secs(120))
                 // A dead/black-holed proxy must be abandoned fast, not after
@@ -962,6 +968,45 @@ impl AppState {
 /// A small Stream adapter over the bytes channel used for relayed responses.
 pub struct ChannelStream {
     pub rx: tokio::sync::mpsc::Receiver<Result<bytes::Bytes, std::io::Error>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redacts_proxy_credentials_but_keeps_host() {
+        assert_eq!(
+            redact_addr("bob:hunter2@10.9.8.7:3128"),
+            "bob:***@10.9.8.7:3128"
+        );
+        assert_eq!(redact_addr("10.9.8.7:3128"), "10.9.8.7:3128");
+        assert_eq!(redact_addr(""), "");
+        // the log/display form drops credentials entirely
+        assert_eq!(display_addr("bob:hunter2@10.9.8.7:3128"), "10.9.8.7:3128");
+    }
+
+    #[test]
+    fn constant_time_compare_is_exact() {
+        assert!(ct_eq("Bearer rly_abc", "Bearer rly_abc"));
+        assert!(!ct_eq("Bearer rly_abc", "Bearer rly_abd"));
+        assert!(!ct_eq("Bearer rly_abc", "Bearer rly_abc "));
+    }
+
+    #[test]
+    fn credentialed_proxy_addresses_are_valid() {
+        // webshare hands out `user:pass@ip:port`; this used to be dropped on
+        // intake, so webshare lanes could never enter the pool at all.
+        assert!(valid_addr("1.2.3.4:8080"));
+        assert!(valid_addr("bob:hunter2@1.2.3.4:8080"));
+        assert!(!valid_addr("bob:hunter2@1.2.3.4:0"));
+        assert!(!valid_addr("bob:hunter2@1.2.3.4"));
+        assert!(!valid_addr("bob:hunter2@1.2.3:8080"));
+        assert!(!valid_addr("bob:hunter2@1.2.3.999:8080"));
+        // subnet grouping and IP extraction keep working with credentials
+        assert_eq!(key_subnet("http://bob:hunter2@1.2.3.4:8080"), "1.2.3");
+        assert_eq!(ip_of("bob:hunter2@1.2.3.4:8080"), "1.2.3.4");
+    }
 }
 
 impl futures_util::Stream for ChannelStream {

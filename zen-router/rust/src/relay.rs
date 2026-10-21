@@ -57,6 +57,10 @@ pub fn fp_id(prefix: &str, invert: bool) -> String {
 
 pub fn fp_headers() -> Vec<(&'static str, String)> {
     let sid = fp_id("ses", true);
+    // `x-opencode-directory` used to carry the relay's absolute working
+    // directory upstream, leaking the operator's local paths. The free tier's
+    // fingerprint gate wants the header present, so send a neutral constant
+    // that reveals nothing about this machine.
     vec![
         ("x-opencode-client", "cli".into()),
         ("x-opencode-session", sid.clone()),
@@ -65,12 +69,7 @@ pub fn fp_headers() -> Vec<(&'static str, String)> {
         ("x-session-affinity", sid.clone()),
         ("x-opencode-request", fp_id("msg", false)),
         ("x-opencode-project", "global".into()),
-        (
-            "x-opencode-directory",
-            std::env::current_dir()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|_| ".".into()),
-        ),
+        ("x-opencode-directory", "/workspace".into()),
     ]
 }
 
@@ -416,7 +415,6 @@ pub async fn attempt(
             .proxy_url()
     };
     let mut b = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
         .no_proxy()
         .connect_timeout(Duration::from_secs(1))
         .timeout(Duration::from_secs_f64(timeout.min(15.0)));
@@ -476,9 +474,10 @@ pub async fn attempt(
                 ),
             });
         }
-    } else if status == 429 && is_quota_429(&body, 429) {
-        st.pool.lock().unwrap().mark_fail(key, false, rt);
     }
+    // Lane accounting for 429 is the caller's job (relay_nonstream /
+    // relay_stream distinguish quota-shaped bodies from odd ones); doing it
+    // here as well charged a single 429 twice.
     Ok(Attempt { status, headers: resp_headers, body })
 }
 

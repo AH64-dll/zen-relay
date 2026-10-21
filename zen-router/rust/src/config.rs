@@ -1,10 +1,45 @@
 //! Settings: same keys, same file format, same semantics as the Python relay.
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
-pub const VERSION: &str = "1.1.7";
+/// These files hold secrets (`relay_api_key`, `upstream_api_key`,
+/// `webshare_token`, and proxy `user:pass` pairs in `lanes.json`), so they are
+/// written 0600 and never inherit the process umask.
+pub fn write_private(path: &Path, body: &str) -> std::io::Result<()> {
+    let tmp = path.with_extension("json.tmp");
+    {
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&tmp)?;
+        f.write_all(body.as_bytes())?;
+    }
+    std::fs::rename(&tmp, path)?;
+    restrict_permissions(path);
+    Ok(())
+}
+
+/// Best-effort 0600 on an existing file (fixes installs created before this).
+pub fn restrict_permissions(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if path.exists() {
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
+pub const VERSION: &str = "1.1.8";
 pub const DEFAULT_UA: &str = "opencode/latest/2.0.32/cli";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -223,6 +258,19 @@ impl Settings {
 
     /// API-boundary validation: bounds + special rules, then set.
     pub fn validate_and_set(&mut self, k: &str, v: &Value) -> Result<(), String> {
+        // An empty relay key means `check_auth` accepts every request, which
+        // silently turns the relay into an open door to the upstream account.
+        // Anonymous mode is an explicit startup choice (RELAY_ALLOW_ANONYMOUS),
+        // never something the HTTP API can switch on.
+        if k == "relay_api_key" {
+            if let Some(s) = v.as_str() {
+                if s.trim().is_empty() {
+                    return Err(
+                        "relay_api_key: cannot be empty — that disables authentication for every client (run with RELAY_ALLOW_ANONYMOUS=1 if that is what you want)".into(),
+                    );
+                }
+            }
+        }
         let bounds: Option<(u64, u64)> = match k {
             "proxy_pool_target" => Some((1, 500)),
             "proxy_max_candidates" => Some((100, 100000)),
@@ -357,10 +405,8 @@ impl Settings {
     }
 
     pub fn save(&self, path: &Path) -> Result<(), String> {
-        let tmp = path.with_extension("json.tmp");
         let body = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        std::fs::write(&tmp, body).map_err(|e| e.to_string())?;
-        std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+        write_private(path, &body).map_err(|e| e.to_string())
     }
 
     pub fn public(&self) -> Value {
@@ -427,6 +473,65 @@ impl Paths {
 }
 
 pub type SettingsLock = RwLock<Settings>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_empty_relay_key() {
+        let mut s = Settings::default();
+        let err = s
+            .validate_and_set("relay_api_key", &json!(""))
+            .unwrap_err();
+        assert!(err.contains("cannot be empty"), "unexpected error: {err}");
+        assert!(s.relay_api_key.is_empty(), "empty key must not be stored");
+        assert!(s.validate_and_set("relay_api_key", &json!("   ")).is_err());
+        assert!(s.validate_and_set("relay_api_key", &json!("rly_abc")).is_ok());
+        assert_eq!(s.relay_api_key, "rly_abc");
+    }
+
+    #[test]
+    fn secret_files_are_owner_only() {
+        let dir = std::env::temp_dir().join(format!(
+            "zen-relay-perm-{}-{}",
+            std::process::id(),
+            now() as u64
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        let s = Settings::default();
+        s.save(&path).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "settings.json must not be group/world readable");
+        }
+        // an existing 0644 file is fixed in place
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+            restrict_permissions(&path);
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn public_view_masks_every_secret() {
+        let mut s = Settings::default();
+        s.relay_api_key = "rly_0123456789abcdef0123456789abcdef".into();
+        s.upstream_api_key = "sk-upstream-secret-value".into();
+        s.webshare_token = "webshare-secret-token".into();
+        let out = s.public().to_string();
+        assert!(!out.contains("0123456789abcdef0123456789abcdef"), "relay key leaked");
+        assert!(!out.contains("sk-upstream-secret-value"), "upstream key leaked");
+        assert!(!out.contains("webshare-secret-token"), "webshare token leaked");
+    }
+}
 
 pub fn now() -> f64 {
     std::time::SystemTime::now()
