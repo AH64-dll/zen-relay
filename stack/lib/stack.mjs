@@ -90,7 +90,7 @@ export class Stack {
   /** Boot the whole stack and keep it alive until shutdown. */
   async run() {
     this.logger.info('stack-start', {
-      version: '1.0.0',
+      version: '1.0.1',
       config: this.config.configFile,
       stateDir: this.config.stateDir,
       node: process.version,
@@ -293,7 +293,10 @@ export class Stack {
         logger: this.logger.child('proxy'),
         readyTimeoutMs: config.proxy.readyTimeoutMs,
         ready: () => this.proxyProbe(),
-        probe: () => this.proxyProbe(),
+        // Liveness after boot: HTTP 200 means the process answers. A cold
+        // proxy pool reports {"ok":false}; restarting the relay for that would
+        // throw away the warming work and loop forever.
+        probe: () => this.proxyProbe({ liveness: true }),
       });
     }
     if (config.tunnel.mode === 'own' && this.components.tunnel === undefined) {
@@ -406,10 +409,13 @@ export class Stack {
 
   // ------------------------------------------------------------------ probes
 
-  proxyProbe() {
+  proxyProbe(options = {}) {
     return httpProbe(this.config.proxy.healthUrl, {
       timeoutMs: this.config.health.timeoutMs,
-      expectJsonOk: this.config.proxy.expectJsonOk === true,
+      // Boot readiness demands a usable lane (`expectJsonOk`). After that, a
+      // 200 is liveness: the pool may be refilling and the relay must not be
+      // restarted just for being cold.
+      expectJsonOk: options.liveness === true ? false : this.config.proxy.expectJsonOk === true,
     });
   }
 

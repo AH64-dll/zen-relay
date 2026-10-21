@@ -22,6 +22,9 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# In a checkout the relay sits next to stack/; resolve it so a fresh machine
+# never inherits the historical ~/.omp path from config.mjs defaults.
+PROXY_DIR=$(cd "$ROOT/../zen-router" 2>/dev/null && pwd || true)
 CONFIG_HOME=${XDG_CONFIG_HOME:-$HOME/.config}
 STATE_HOME=${XDG_STATE_HOME:-$HOME/.local/state}
 CONFIG_DIR=$CONFIG_HOME/dsh-stack
@@ -30,7 +33,7 @@ UNIT_DIR=$CONFIG_HOME/systemd/user
 UNIT_FILE=$UNIT_DIR/dsh-stack.service
 STATE_DIR=${DSH_STACK_STATE_DIR:-$STATE_HOME/dsh-stack}
 LEGACY_RECORD=$STATE_DIR/legacy-units.json
-LEGACY_UNITS=(dsh-harness.service zen-rotator.service cloudflared-tunnel.service)
+LEGACY_UNITS=(dsh-harness.service zen-rotator.service zen-relay.service cloudflared-tunnel.service)
 
 DRY_RUN=0
 KEEP_LEGACY=0
@@ -99,6 +102,7 @@ preflight() {
   command -v node >/dev/null || die "node not found on PATH; put the Harness's node on PATH first"
 
   NODE_BIN=$(command -v node)
+  NODE_REAL=$(readlink -f "$NODE_BIN" 2>/dev/null || printf '%s' "$NODE_BIN")
   NODE_VERSION=$(node -p 'process.versions.node')
   say "node        $NODE_BIN ($NODE_VERSION)"
   node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 22 ? 0 : 1)' \
@@ -106,7 +110,7 @@ preflight() {
 
   DSH_BIN=$(command -v dsh || true)
   if [[ -z $DSH_BIN ]]; then
-    for candidate in "$HOME/.local/node24"/*/bin/dsh "$HOME/.local/bin/dsh"; do
+    for candidate in "$(dirname "$NODE_REAL")/dsh" "$HOME/.local/node24"/*/bin/dsh "$HOME/.local/bin/dsh"; do
       [[ -x $candidate ]] && { DSH_BIN=$candidate; break; }
     done
   fi
@@ -157,13 +161,14 @@ write_config() {
     say "[dry-run] would write $CONFIG_FILE from discovered paths:"
     dim "harness.command = $DSH_BIN"
     dim "proxy.command   = ${RELAY_BIN:-<unset>}"
+    dim "proxy.cwd       = ${PROXY_DIR:-<default>}"
     dim "tunnel.command  = ${CLOUDFLARED_BIN:-<unset>} tunnel --url http://127.0.0.1:30141 --no-autoupdate"
     dim "tunnel.mode     = $TUNNEL"
     return 0
   fi
 
   ROOT="$ROOT" CONFIG_FILE="$CONFIG_FILE" DSH_BIN="$DSH_BIN" RELAY_BIN="${RELAY_BIN:-}" \
-  CLOUDFLARED_BIN="${CLOUDFLARED_BIN:-}" TUNNEL_MODE="$TUNNEL" node --input-type=module -e '
+  PROXY_DIR="${PROXY_DIR:-}" CLOUDFLARED_BIN="${CLOUDFLARED_BIN:-}" TUNNEL_MODE="$TUNNEL" node --input-type=module -e '
     import fs from "node:fs";
     const { defaults, merge, toInstallDocument } = await import(
       new URL("lib/config.mjs", "file://" + process.env.ROOT + "/").href
@@ -198,6 +203,22 @@ write_config() {
       next.proxy.command = [process.env.RELAY_BIN];
     }
     next.installDir = process.env.ROOT;
+    // The relay and its state belong to this checkout. Force the paths (an
+    // older config must not keep pointing at the historical ~/.omp location,
+    // which usually does not exist and makes spawn fail with ENOENT).
+    if (process.env.PROXY_DIR) {
+      const relayDir = process.env.PROXY_DIR;
+      if (next.proxy.cwd !== relayDir) {
+        console.log("    note: proxy.cwd " + next.proxy.cwd + " -> " + relayDir);
+      }
+      next.proxy.cwd = relayDir;
+      next.proxy.env = {
+        ...(next.proxy.env ?? {}),
+        SETTINGS_FILE: relayDir + "/settings.json",
+        LANES_FILE: relayDir + "/lanes.json",
+        BURNED_FILE: relayDir + "/burned.json",
+      };
+    }
     // An explicit --no-tunnel must win over an older config file.
     next.tunnel.mode = process.env.TUNNEL_MODE;
     next.configFile = undefined;
@@ -297,10 +318,17 @@ install_unit() {
 
   # Install the shipped unit, anchoring every %h-relative path to this checkout
   # so an install from ~/Music/dsh-stack and one from /opt both work.
-  local escaped
+  local escaped escaped_node node_dir
   escaped=$(printf '%s' "$ROOT" | sed -e 's/[&|\\]/\\&/g')
+  # The shipped PATH pins one node build; substitute the node this checkout was
+  # installed with (following a symlink), otherwise `env node` cannot be found
+  # on a machine whose node lives anywhere else.
+  node_dir=$(dirname "$(readlink -f "$NODE_BIN" 2>/dev/null || printf '%s' "$NODE_BIN")")
+  escaped_node=$(printf '%s' "$node_dir" | sed -e 's/[&|\\]/\\&/g')
   sed -e "s|%h/Music/dsh-stack|$escaped|g" \
       -e "s|/home/[[:alnum:]_.-]*/Music/dsh-stack|$escaped|g" \
+      -e "s|%h/.local/node24/node-v24.22.0-linux-x64/bin|$escaped_node|g" \
+      -e "s|/home/[[:alnum:]_.-]*/.local/node24/node-v24.22.0-linux-x64/bin|$escaped_node|g" \
       "$ROOT/systemd/dsh-stack.service" > "$UNIT_FILE"
   chmod 0644 "$UNIT_FILE"
   say "installed $UNIT_FILE"

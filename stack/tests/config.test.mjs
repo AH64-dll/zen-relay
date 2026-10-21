@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { defaults, loadConfig, merge, toInstallDocument } from '../lib/config.mjs';
 
@@ -29,8 +30,18 @@ test('defaults are internally consistent', () => {
   assert.equal(config.keeper.statusFile, '/home/ai/.dsh/session-keeper/status.json');
 });
 
-test('a config file overrides defaults without losing sibling fields', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-stack-config-'));
+test('a checkout keeps the relay and its state inside the checkout', () => {
+  // stack/tests/config.test.mjs -> stack/tests -> stack -> repository root
+  const repoRoot = path.dirname(path.dirname(path.dirname(fileURLToPath(import.meta.url))));
+  const relayDir = path.join(repoRoot, 'zen-router');
+  const config = defaults({ HOME: '/home/ai' });
+  assert.equal(config.proxy.cwd, relayDir);
+  assert.equal(config.proxy.env.SETTINGS_FILE, path.join(relayDir, 'settings.json'));
+  assert.equal(config.proxy.env.LANES_FILE, path.join(relayDir, 'lanes.json'));
+  assert.equal(config.proxy.env.BURNED_FILE, path.join(relayDir, 'burned.json'));
+});
+
+test('a config file overrides defaults without losing sibling fields', () => {  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-stack-config-'));
   const file = path.join(dir, 'config.json');
   fs.writeFileSync(
     file,

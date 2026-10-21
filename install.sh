@@ -35,7 +35,8 @@ command -v node >/dev/null || die "node not found (need >= 22)"
 node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 22 ? 0 : 1)' \
   || die "node >= 22 required"
 
-command -v dsh >/dev/null || warn "dsh not found on PATH; install it before the Harness can start"
+# dsh is resolved by stack/install.sh (PATH, the node bin dir, ~/.local/bin),
+# so do not reject a machine where it is installed but not exported here.
 command -v cloudflared >/dev/null || warn "cloudflared not found; the public URL will be skipped"
 
 if [[ ! -f "$SETTINGS" ]]; then
