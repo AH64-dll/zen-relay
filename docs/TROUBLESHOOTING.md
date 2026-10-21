@@ -11,6 +11,8 @@
 | `403 quota` من المزوّد عبر كل الـlanes | `/api/pool` ثم `/api/burned` | كل IP في الدور استُهلك رصيده (منك أو من غيرك)؛ المرحّل يبدّل الـIP تلقائياً، لكن رصيد IP واحد = طلب واحد |
 | `webshare: the API answered HTTP 401` | `grep webshare_token zen-router/settings.json` | المفتاح منتهٍ أو خاطئ؛ أنشئ مفتاحاً جديداً من Webshare → Dashboard → API Keys وضعه بـ`scripts/set-webshare-token.sh` |
 | `warm` كبير لكن `proven: 0` | `curl /healthz` | الـlanes تصل إلى المزوّد لكن لم تنجح في طلب واحد بعد؛ تأكّد من مفتاح Webshare ومن أن `stage2_probe` لا يستهلك رصيد الـIP |
+| الـFunnel يعمل بـ`tailscale` لكن لا شيء يُقدَّم | `tailscale --socket=/run/tailscale/tailscaled.sock funnel status` | Funnel يحتاج جهاز TUN: شغّل `tailscaled` كخدمة نظام (root) لا في وضع userspace |
+| Webshare: `failed in transport … Connect` | `curl --proxy http://user:pass@IP:PORT https://opencode.ai/zen/v1/models` | خطّة Webshare المجانية لا تمرّر CONNECT (HTTPS) — استخدم خطّة مدفوعة Supporting CONNECT |
 | `FreeTierError` من المزوّد أو `warm=0` دائم | اطلب `inference/openai/v1` مباشرة بلا بروكسي | المزوّد يقيّد الطبقة المجانية على عميل OpenCode الرسمي؛ استخدم الجسر (`opencode-bridge` على منفذ `8902`) فيمرّ الطلب من OpenCode نفسه، أو مفتاح OpenCode صالح أو مزوّد آخر |
 | `GLIBC_2.34 not found` | توزيعة قديمة | ابنِ من المصدر: `cargo build --release` |
 | `Address already in use` | عملية أخرى على 8901 | `ss -lntp \| grep 8901`؛ أوقف `zen-rotator` إن كان `dsh-stack` يدير المرحّل |

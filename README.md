@@ -218,9 +218,38 @@ cloudflared tunnel route dns zen-harness harness.example.com
 ```
 
 الـstack ينشر `https://harness.example.com/?token=…` في `~/dsh-url.txt` على كل
-إقلاع، بنفس العنوان. تحتاج نطاقاً مُداراً على Cloudflare. بديل بلا نطاق:
-Tailscale Funnel — ضع `tailscale funnel --bg 30141` في `tunnel.command` واضبط
-`tunnel.hostname` على اسم الجهاز `*.ts.net`.
+إقلاع، بنفس العنوان. تحتاج نطاقاً مُداراً على Cloudflare.
+
+**بديل بلا نطاق: Tailscale Funnel** (عنوان دائم `*.ts.net`، حساب مجاني):
+
+```bash
+# 1. tailscaled كخدمة نظام (يحتاج TUN ⇒ root)
+install -m 0755 ~/.local/bin/tailscaled /usr/local/bin/tailscaled
+install -m 0755 ~/.local/bin/tailscale  /usr/local/bin/tailscale
+#    ExecStart=/usr/local/bin/tailscaled --state=/var/lib/tailscale/tailscaled.state \
+#              --socket=/run/tailscale/tailscaled.sock
+#    ExecStartPost=/bin/sh -c 'sleep 2; chmod 0666 /run/tailscale/tailscaled.sock'
+systemctl enable --now tailscaled
+
+# 2. سجّل الجهاز (يفتح المتصفح)
+tailscale --socket=/run/tailscale/tailscaled.sock up --hostname zen-harness
+
+# 3. اسمح للمستخدم بإعداد الـserve config (مرة واحدة)
+sudo tailscale --socket=/run/tailscale/tailscaled.sock set --operator=$USER
+
+# 4. فعّل Funnel (مرة واحدة)
+tailscale --socket=/run/tailscale/tailscaled.sock funnel --bg 30141
+
+# 5. اجعل الـstack هو المالك
+#    tunnel.mode = "named"، namedCommand = tailcale ... funnel 30141،
+#    tunnel.hostname = zen-harness.<tailnet>.ts.net
+```
+
+النتيجة: `https://zen-harness.<tailnet>.ts.net/?token=…` — نفس العنوان بعد كل
+إقلاع؛ يتغير رمز الدخول فقط.
+
+> ملاحظة: الـFunnel يحتاج جهاز TUN، أي `tailscaled` يعمل كـroot. في وضع
+> userspace يُمنح الشهادة لكن لا يُقدَّم أي اتصال.
 
 ---
 
@@ -233,6 +262,12 @@ Tailscale Funnel — ضع `tailscale funnel --bg 30141` في `tunnel.command` و
 - `stage2_probe`: `false` — لا يُثبت الـlane بطلب حقيقي (الطبقة المجانية تسمح
   بنحو طلب واحد لكل IP، والفحص كان يستهلكه)
 - `webshare_token` / `webshare_rotating`: مصدر البروكسيات الحقيقي
+
+> **حدّ مهم (مقيس):** خطّة Webshare المجانية (10 عناوين سكنية) تمرّر HTTP
+> العادي لكن **لا تمرّر نفق HTTPS (CONNECT)** — والمزوّد يطلب HTTPS. لذلك لا
+> تصلح الخطّة المجانية لهذا المرحّل: تحتاج خطّة مدفوعة (Backbone/Rotation)
+> تدعم CONNECT. المرحّل يطلب `mode=direct` أساساً؛ أضِف `mode=backbone` إن
+> كانت خطّتك دوّارة.
 
 كل الحقول في [`config/settings.example.json`](config/settings.example.json).
 
