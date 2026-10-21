@@ -12,7 +12,7 @@
 
 > **ما هو المرحّل؟** خدمة متوافقة مع OpenAI API فقط (`/v1/models` و
 > `/v1/chat/completions`). ليس VPN ولا بروكسي شبكة، ولا يوجّه تصفّح الجهاز.
-> `/v1/messages` (صيغة Anthropic) **غير مدعوم** في 1.1.7 — انظر قسم الأخطاء.
+> `/v1/messages` (صيغة Anthropic) **غير مدعوم** في 1.2.0 — انظر قسم الأخطاء.
 
 ---
 
@@ -222,7 +222,7 @@ curl -s http://127.0.0.1:8901/healthz | python3 -m json.tool
 ```json
 {
   "ok": true,
-  "version": "1.1.7",
+  "version": "1.2.0",
   "warm": 38,
   "parked": 42,
   "queue": 1020,
@@ -545,30 +545,28 @@ cp config/dsh-cordis.patch.yml ~/.dsh/cordis.patch.yml
 - id: llm-pi-ai
   config:
     providers:
-      opencode-zen:
-        displayName: OpenCode Zen (local relay)
+      opencode-bridge:
+        displayName: OpenCode (local bridge)
         api: openai-completions
         apiKeyEnv: OMP_ZEN_RELAY_KEY
-        baseURL: http://127.0.0.1:8901/v1
-        retryPolicy:
-          mode: normal
-          maxRetries: 8
-          retryableCodes: [EMPTY_RESPONSE, RATE_LIMIT, SERVER, TIMEOUT, TRANSPORT, QUOTA, AUTH]
-          backoff:
-            initialDelayMs: 800
-            maxDelayMs: 20000
-            jitterRatio: 0.25
+        baseURL: http://127.0.0.1:8902/v1
         models:
           - id: deepseek-v4.1-flash-free
-            name: DeepSeek V4.1 Flash (free)
+            name: DeepSeek V4.1 Flash (free, via OpenCode)
             contextWindow: 200000
             input: [text]
 
 - id: agent-default-model
   config:
-    provider: opencode-zen
+    provider: opencode-bridge
     model: deepseek-v4.1-flash-free
 ```
+
+هذا هو **الحد الأدنى**: المسار الوحيد المضمون اليوم هو الجسر (`:8902` → خادم
+OpenCode المحلي → opencode.ai)، لأن الطبقة المجانية ترفض العملاء من خارج
+OpenCode. القالب الكامل `config/dsh-cordis.patch.yml` يضيف أيضاً مزوّد
+`opencode-zen` (مسار المرحّل `:8901`) كخيار ثانٍ لمن يشغّل مورّد بروكسيات
+مدفوعاً — يعمل فقط حين تسمح الوجهة لعملاء غير OpenCode.
 
 `apiKeyEnv` **اسم مرجع**، لا قيمة. القيمة تُحلّ من مخزن الاعتماد أو البيئة.
 
@@ -636,11 +634,13 @@ dsh web --port 30141
 
 ```bash
 # 1) هل دخل الربط في الشجرة المركّبة؟
-dsh --profile web --dump-config | grep -A8 'opencode-zen:'
+dsh --profile web --dump-config | grep -A8 'opencode-bridge:'
+dsh --profile web --dump-config | grep -A3 'agent-default-model'
 
 # 2) هل الـHarness يعمل؟
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:30141/     # 401 بلا توكن
-curl -s http://127.0.0.1:8901/healthz                                 # ok:true
+curl -s http://127.0.0.1:8902/healthz                              # ok:true — المسار الافتراضي (الجسر)
+# curl -s http://127.0.0.1:8901/healthz                           # المسار الثانوي؛ ok قد يبقى false بلا مورّد مدفوع
 
 # 3) السجل
 journalctl --user -u dsh-stack -n 50 --no-pager
@@ -728,16 +728,26 @@ sudo loginctl enable-linger $(id -un)
 systemctl --user is-active dsh-stack          # active
 node stack/bin/dsh-stack status               # جدول المكوّنات
 node stack/bin/dsh-stack doctor               # المسارات والصلاحيات
-cat ~/dsh-url.txt                             # https://<name>.trycloudflare.com/?token=...
+cat ~/dsh-url.txt                             # https://<tunnel-host>/?token=... — مثل trycloudflare.com أو <host>.ts.net
 curl -s http://127.0.0.1:8901/healthz
 ```
 
 ### 7.4 النفق
 
-- `cloudflared tunnel --url http://127.0.0.1:30141` — **quick tunnel**.
-- الاسم يتغيّر عند كل إعادة تشغيل أو إقلاع؛ من شارك الرابط يفقد الوصول.
-- للثبات استخدم نفقاً مُسمّى (انظر `OTHER-DEVICES.md`).
-- الـHarness يُشغَّل بـ`--trusted-host <tunnel host>` تلقائياً.
+النفق له ثلاثة أنماط في `~/.config/dsh-stack/config.json` (`tunnel.mode`):
+
+- **`own` — Cloudflare quick tunnel**: `cloudflared tunnel --url
+  http://127.0.0.1:30141`. الاسم يتغيّر عند كل إعادة تشغيل أو إقلاع؛ من شارك
+  الرابط يفقد الوصول.
+- **`named` — اسم ثابت**: ينفّذ `tunnel.namedCommand` ويستخدم `tunnel.hostname`
+  مباشرةً (لا ينتظر اسماً من المخرجات). على هذا الجهاز: **Tailscale Funnel** —
+  `namedCommand = tailscale ... funnel 30141` و
+  `hostname = zen-harness.<tailnet>.ts.net`. بديل Cloudflare المُسمّى:
+  `cloudflared tunnel run <name>` مع نطاق مُدار (انظر `OTHER-DEVICES.md`).
+- **`external` / غياب النفق**: لا عنوان عام.
+
+الـHarness يُشغَّل بـ`--trusted-host <tunnel host>` تلقائياً. ملاحظة: هذا
+التثبيت يستخدم Tailscale Funnel لا Cloudflare؛ انظر README §«بديل بلا نطاق».
 
 لنشر المرحّل نفسه (لا الـHarness) على نفق:
 
@@ -786,7 +796,7 @@ caddy run --config config/Caddyfile.example   # بعد تعديل النطاق
 | `503 zen_lane_blocked` | كل الـlanes المقترحة محظورة من الوجهة | مؤقت: أعد المحاولة. إن تكرر: امسح `burned` وحدّث الـpool |
 | `403 quota` في السجل | رصيد الـIP انتهى عند الوجهة | ليس خطأ مفتاح؛ الـlane يُحرق تلقائياً. أضف مصدراً/Webshare |
 | `426 UpgradeRequired` | UA يحوي `opencode` بصيغة غير معتمدة | لا تقلّد البصمة؛ أرسل UA عادياً أو حدّث `upstream_user_agent` |
-| `404` على `/v1/messages` | غير مدعوم في 1.1.7 | استخدم `/v1/chat/completions` أو عميل OpenAI |
+| `404` على `/v1/messages` | غير مدعوم في 1.2.0 | استخدم `/v1/chat/completions` أو عميل OpenAI |
 | `Connection refused` | المرحّل غير مشغّل/منفذ مختلف | `ss -ltnp | grep 8901`؛ راجع `PORT` |
 | `530` من نفق Cloudflare | quick tunnel تعطّل أو تغيّر اسمه | أعد التشغيل واقرأ `~/dsh-url.txt`؛ أو نفق مُسمّى |
 | dsh: «Invalid API key» | المفتاح لم يُحلّ | `dsh --profile web --dump-config | grep apiKeyEnv`؛ ضع `OMP_ZEN_RELAY_KEY` في البيئة/المخزن |
@@ -823,7 +833,7 @@ curl -s 127.0.0.1:8901/api/stats -H "authorization: Bearer $KEY" | head -c 400
 - المفتاح واحد للعملاء ولـ`/api/*`: من يملكه يستطيع تغيير الإعدادات ومسح
   الحالة. لا تشاركه مع أجهزة غير موثوقة.
 - عند النشر العام: احجب `/api/*` (Caddy)، واستخدم TLS، وفكّر في مفتاح منفصل
-  للإدارة (غير متاح في 1.1.7 — يحتاج تعديل Rust).
+  للإدارة (غير متاح في 1.2.0 — يحتاج تعديل Rust).
 - النفق يعرّض الـHarness نفسه: رابط الدخول يحوي توكن جلسة؛ لا تنشره علناً.
 
 ---
@@ -834,11 +844,13 @@ curl -s 127.0.0.1:8901/api/stats -H "authorization: Bearer $KEY" | head -c 400
 - [ ] `./run.sh` يعمل و`/healthz` يعيد `"ok":true`.
 - [ ] `settings.json` موجود، مفتاحه `rly_...`، وصلاحياته `600`.
 - [ ] `/v1/models` يعيد 200 مع المفتاح و401 بدونه.
-- [ ] طلب إكمال يعيد نصاً (وليس 503).
-- [ ] `opencode models | grep zen-relay` يظهر الموديل.
-- [ ] `opencode run ... --model zen-relay/...` يعيد رداً.
-- [ ] `~/.dsh/cordis.patch.yml` يحوي `opencode-zen` و`agent-default-model`.
-- [ ] `dsh --profile web --dump-config | grep -A3 opencode-zen` يظهر `baseURL`.
+- [ ] طلب إكمال يعيد نصاً (وليس 503) — عبر الجسر `:8902` اليوم؛ المرحّل `:8901`
+  يحتاج مورّد بروكسيات يعمل.
+- [ ] `opencode models | grep zen-relay` يظهر الموديل (فقط إن ربطت OpenCode
+  نفسه بالمرحّل في §5 — الجسر لا يحتاجها).
+- [ ] `opencode run ... --model zen-relay/...` يعيد رداً (نفس الشرط).
+- [ ] `~/.dsh/cordis.patch.yml` يحوي `opencode-bridge` و`agent-default-model`.
+- [ ] `dsh --profile web --dump-config | grep -A3 opencode-bridge` يظهر `baseURL`.
 - [ ] `OMP_ZEN_RELAY_KEY` موجود في بيئة الـHarness أو في `.credentials.yaml`.
 - [ ] الـHarness يرد على رسالة اختبار بالموديل الصحيح.
 - [ ] `systemctl --user is-active dsh-stack` = `active` (إن استخدمت الحزمة).
@@ -878,17 +890,19 @@ curl -s 127.0.0.1:8901/healthz
 # كتالوج
 curl -s 127.0.0.1:8901/v1/models -H "authorization: Bearer $KEY"
 
-# اختبار سريع
-curl -s 127.0.0.1:8901/v1/chat/completions \
+# اختبار سريع — الجسر هو المسار العامل افتراضياً
+curl -s 127.0.0.1:8902/healthz
+curl -s 127.0.0.1:8902/v1/chat/completions \
   -H "authorization: Bearer $KEY" -H "content-type: application/json" \
   -d '{"model":"deepseek-v4.1-flash-free","messages":[{"role":"user","content":"hi"}],"max_tokens":5}'
+# (المرحّل 8901: استبدل المنفذ أعلاه — يعمل فقط مع مورّد بروكسيات سليم)
 
 # OpenCode
 opencode models | grep zen-relay
 opencode run "hi" --model zen-relay/deepseek-v4.1-flash-free
 
 # dsh
-dsh --profile web --dump-config | grep -A8 'opencode-zen:'
+dsh --profile web --dump-config | grep -A8 'opencode-bridge:'
 systemctl --user restart dsh-stack
 cat ~/dsh-url.txt
 ```

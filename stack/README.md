@@ -68,9 +68,12 @@ racing the Host's writer, and a plugin cannot restart a dead Host.
 3. **Proxy** — spawn `zen-relay` in its own process group, then poll
    `GET http://127.0.0.1:8901/healthz` until it answers
    `{"ok":true,...}` (timeout 180 s).
-4. **Tunnel** — spawn `cloudflared tunnel --url http://127.0.0.1:30141`, parse
-   the `https://<name>.trycloudflare.com` hostname from its output
-   (timeout 90 s). Optional: a tunnel failure degrades the public URL only.
+4. **Tunnel** — `own`: spawn `cloudflared tunnel --url http://127.0.0.1:30141`,
+   parse the `https://<name>.trycloudflare.com` hostname from its output
+   (timeout 90 s). `named`: spawn `tunnel.namedCommand` (e.g.
+   `cloudflared tunnel run <name>` or `tailscale funnel 30141`) and use
+   `tunnel.hostname` directly — no parsing. Optional: a tunnel failure degrades
+   the public URL only.
 5. **Bridge** — spawn `opencode-bridge` (see below) and poll
    `GET http://127.0.0.1:8902/healthz` until it reports `ok:true` (timeout
    60 s). Optional unless `bridge.required` is set.

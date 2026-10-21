@@ -39,10 +39,14 @@
 - مصادقة واحدة: `Authorization: Bearer rly_…` (أو المفتاح مجرداً). كل المسارات
   تحت `/api` و`/v1` محمية؛ `/healthz` فقط مفتوح.
 
-## الطبقة 2 — النفق (`cloudflared`)
+## الطبقة 2 — النفق
 
-- quick tunnel: بلا حساب، لكن الاسم يتغيّر عند كل تشغيل.
-- named tunnel: اسم ثابت، يحتاج حساب Cloudflare ونطاقاً.
+ثلاثة أنماط (`tunnel.mode` في `config.json`):
+
+- `own` — Cloudflare quick tunnel: بلا حساب، لكن الاسم يتغيّر عند كل تشغيل.
+- `named` — أمر ثابت من `namedCommand` واسم من `hostname`: نفق Cloudflare
+  مُسمّى (يحتاج نطاقاً)، أو **Tailscale Funnel** (`tailscale funnel 30141` ←
+  `https://<host>.<tailnet>.ts.net` — النمط المستخدم على هذا التثبيت).
 - لا يُشترط النفق للاستخدام المحلي؛ بدونه يعمل كل شيء على نفس الجهاز.
 
 ## الطبقة 3 — المشرف (`stack/`)
@@ -61,7 +65,9 @@
 ## الطبقة 4 — الـHarness (`dsh`)
 
 - يعرض واجهة ويب على `30141` مع مصادقة كوكي مرتبطة بالمضيف (30 يوماً).
-- يتصل بالمرحّل عبر `opencode-zen` في `cordis.patch.yml` (‏`baseURL` على 8901).
+- يتصل افتراضياً بالجسر `opencode-bridge` (‏`baseURL` على 8902) الذي يقود خادم
+  OpenCode المحلي؛ مزوّد `opencode-zen` (المرحّل على 8901) يبقى مساراً ثانوياً.
+  الربط في `cordis.patch.yml`.
 - الـplugin `dsh-session-keeper` يستأنف الجلسات التي انقطع turnها بعد عطل.
 
 ## أين تُحفظ الحالة والأسرار

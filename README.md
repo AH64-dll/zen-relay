@@ -132,9 +132,11 @@ PORT=8901 HOST=127.0.0.1 ./run.sh
 الشكل الكامل:
 
 ```
-client ──HTTPS──▶ cloudflared ──▶ dsh web :30141 ──▶ zen-relay :8901 ──▶ opencode.ai
-                                      ▲
-                                 dsh-stack (systemd --user)
+client ──HTTPS──▶ tunnel ──▶ dsh web :30141 ──▶ opencode-bridge :8902 ──▶ opencode ──▶ opencode.ai
+                    (cloudflared أو                ▲                (المسار الافتراضي)
+                     Tailscale Funnel)             └────▶ zen-relay :8901 (مسار ثانٍ)
+                                 ▲
+                            dsh-stack (systemd --user)
 ```
 
 التفاصيل في [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
@@ -244,7 +246,7 @@ sudo tailscale --socket=/run/tailscale/tailscaled.sock set --operator=$USER
 tailscale --socket=/run/tailscale/tailscaled.sock funnel --bg 30141
 
 # 5. اجعل الـstack هو المالك
-#    tunnel.mode = "named"، namedCommand = tailcale ... funnel 30141،
+#    tunnel.mode = "named"، namedCommand = tailscale ... funnel 30141،
 #    tunnel.hostname = zen-harness.<tailnet>.ts.net
 ```
 

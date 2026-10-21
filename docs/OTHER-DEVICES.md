@@ -98,7 +98,7 @@ apiKeyEnv: OMP_ZEN_RELAY_KEY
 
 المفتاح في `apiKeyEnv` لا في الملف، كما في `config/dsh-cordis.patch.yml`.
 
-**Anthropic-شكل** — غير مدعوم في 1.1.7: `POST /v1/messages` يعيد 404. استخدم
+**Anthropic-شكل** — غير مدعوم في 1.2.0: `POST /v1/messages` يعيد 404. استخدم
 `/v1/chat/completions` أو عميل OpenAI-compatible.
 
 ---
@@ -154,6 +154,12 @@ cloudflared tunnel run --url http://127.0.0.1:8901 zen-relay
 ```
 
 بعدها `https://relay.example.com/v1` ثابت، ولا يتغيّر مع إعادة التشغيل.
+
+بديل بلا حساب Cloudflare ولا نطاق: **Tailscale Funnel**. على هذا الجهاز
+الـHarness نفسه منشور هكذا (`tailscale funnel 30141` ← `https://zen-harness
+.<tailnet>.ts.net`). للمرحّل نفسه يمكن تشغيل `tailscale funnel 8901` فيصبح
+`https://<host>.<tailnet>.ts.net/v1` عنواناً ثابتاً — تفاصيل الإعداد في
+README §«بديل بلا نطاق». يحتاج `tailscaled` بجهاز TUN (root).
 
 ---
 
