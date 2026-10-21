@@ -1,0 +1,28 @@
+{
+  "name": "@local/dsh-session-keeper",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Crash recovery and keep-alive for active Harness sessions: resumes interrupted turns after a crash, once, behind a proxy readiness gate.",
+  "icon": "./icon.svg",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "lib/*.mjs",
+    "cordis.patch.yml",
+    "icon.svg",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "meta": {
+    "title": "Session Keeper",
+    "description": "Recovers sessions whose turn was interrupted by a crash, power loss, or kill. Scans stored session logs for an unbalanced final turn, resumes exactly once through the harness's own agent path, and quarantines sessions that keep crashing the host."
+  }
+}

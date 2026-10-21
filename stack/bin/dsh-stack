@@ -1,0 +1,432 @@
+#!/usr/bin/env node
+/**
+ * `dsh-stack` — supervisor for the Harness, the model proxy, and the tunnel.
+ *
+ *   dsh-stack run                 supervise the stack (this is what systemd runs)
+ *   dsh-stack status [--json]     last known state, optionally probed live
+ *   dsh-stack wait --target ...   block until a component answers (boot gating)
+ *   dsh-stack selftest            probe everything and print PASS/FAIL
+ *   dsh-stack doctor              validate config, binaries and paths
+ *   dsh-stack sessions [--json]   sessions whose last turn never closed
+ *   dsh-stack version | help
+ *
+ * Exit codes: 0 success, 1 failure (selftest/doctor/wait timeout), 2 usage.
+ *
+ * @module dsh-stack/bin
+ */
+
+import fs from 'node:fs';
+import path from 'node:path';
+
+import { loadConfig, defaults } from '../lib/config.mjs';
+import { createLogger } from '../lib/log.mjs';
+import { createNotifier } from '../lib/sdnotify.mjs';
+import { httpProbe, tcpProbe, waitUntil } from '../lib/probe.mjs';
+import { Stack } from '../lib/stack.mjs';
+import { scanInterrupted } from '../lib/sessionscan.mjs';
+
+const VERSION = '1.0.0';
+
+const USAGE = `dsh-stack ${VERSION} — boot orchestrator and supervisor for Harness + proxy
+
+Usage:
+  dsh-stack run                    supervise the stack (systemd entry point)
+  dsh-stack status [--json]        print the status document (--probe for live checks)
+  dsh-stack wait --target T        block until T answers (proxy | harness | all)
+              [--timeout MS]
+  dsh-stack selftest               probe config, proxy, harness and the session store
+  dsh-stack doctor                 validate binaries, paths, permissions and units
+  dsh-stack sessions [--json]      list sessions whose last turn never closed
+              [--limit N] [--all]
+  dsh-stack config                 print the effective configuration
+  dsh-stack version | help
+
+Environment:
+  DSH_STACK_CONFIG       config file (default ~/.config/dsh-stack/config.json)
+  DSH_STACK_STATE_DIR    state directory (default ~/.local/state/dsh-stack)
+  DSH_STACK_PORT         override the Harness port
+  DSH_STACK_PROXY_MODE   own | external
+  DSH_STACK_NO_TUNNEL=1  disable the Cloudflare quick tunnel
+`;
+
+/**
+ * Minimal argv parser: `--flag`, `--flag value`, `--flag=value`.
+ * @param {string[]} argv
+ */
+function parseArgs(argv) {
+  const flags = { _: [] };
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index];
+    if (token.startsWith('--')) {
+      const [name, inline] = token.slice(2).split('=');
+      if (inline !== undefined) {
+        flags[name] = inline;
+      } else if (index + 1 < argv.length && !argv[index + 1].startsWith('--')) {
+        flags[name] = argv[index + 1];
+        index += 1;
+      } else {
+        flags[name] = true;
+      }
+    } else {
+      flags._.push(token);
+    }
+  }
+  return flags;
+}
+
+/** @param {string} file */
+function exists(file) {
+  try {
+    fs.accessSync(file, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** @param {string} file */
+function readable(file) {
+  try {
+    fs.accessSync(file, fs.constants.R_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function commandRun() {
+  const config = loadConfig();
+  const logger = createLogger({
+    file: config.log.file,
+    maxBytes: config.log.maxBytes,
+    keep: config.log.keep,
+    echoWarnings: config.log.echoWarnings,
+  });
+  const notify = createNotifier({ logger });
+  const stack = new Stack({ config, logger, notify });
+  await stack.run();
+  // Keep the process alive: the timers own the lifecycle.
+  await new Promise(() => {});
+  return 0;
+}
+
+async function commandStatus(flags) {
+  const config = loadConfig();
+  const file = path.join(config.stateDir, 'status.json');
+  let document;
+  try {
+    document = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch (error) {
+    process.stderr.write(`no status document at ${file} (${/** @type {any} */ (error)?.code ?? 'error'}); is dsh-stack.service running?\n`);
+    return 1;
+  }
+  if (flags.json === true) {
+    process.stdout.write(`${JSON.stringify(document, null, 2)}\n`);
+    return 0;
+  }
+
+  const lines = [];
+  const ago = (at) => (typeof at === 'number' ? `${Math.max(0, Math.round((Date.now() - at) / 1000))}s ago` : '—');
+  lines.push(`dsh-stack ${VERSION}  pid=${document.pid}  host=${document.hostname}  phase=${document.phase}  ready=${document.ready}`);
+  lines.push(`started ${ago(document.startedAt)}   updated ${ago(document.updatedAt)}   port=${document.port ?? '—'}`);
+  if (document.fatal) lines.push(`FATAL: ${document.fatal.reason}`);
+  lines.push('');
+  lines.push('COMPONENT   STATE      PID      READY       RESTARTS  DETAIL');
+  for (const [name, component] of Object.entries(document.components ?? {})) {
+    const detail = component.state === 'ready'
+      ? (component.lastProbe ?? '')
+      : (component.lastError ?? component.lastProbe ?? '');
+    lines.push(
+      `${name.padEnd(11)} ${String(component.state).padEnd(10)} ${String(component.pid ?? '—').padEnd(8)} ${String(component.readyAt === null ? '—' : ago(component.readyAt)).padEnd(11)} ${'—'.padEnd(9)} ${detail}`,
+    );
+  }
+  lines.push('');
+  lines.push(`tunnel: ${document.tunnel?.host ?? '(none)'}   sign-in: ${document.signIn?.url ?? '(not published)'}`);
+  const keeper = document.keeper;
+  lines.push(
+    keeper === null || keeper === undefined
+      ? 'recovery: no keeper status yet (plugin installed? see README)'
+      : `recovery: phase=${keeper.phase ?? '—'} scanned=${keeper.scanned ?? '—'} interrupted=${keeper.candidates ?? '—'} resumed=${keeper.resumed ?? '—'} skipped=${keeper.skipped ?? '—'} (updated ${ago(keeper.updatedAt)})`,
+  );
+  if (document.sessions) {
+    lines.push(
+      `sessions-verified: scanned=${document.sessions.scanned} still-interrupted=${document.sessions.interrupted}`
+      + ` (${document.sessions.resumable ?? '—'} candidate(s), ${document.sessions.children ?? 0} subagent child)`
+      + ` errors=${document.sessions.errors}`,
+    );
+  }
+
+  if (flags.probe === true) {
+    lines.push('');
+    const proxy = await httpProbe(config.proxy.healthUrl, { timeoutMs: config.health.timeoutMs, expectJsonOk: config.proxy.expectJsonOk });
+    const harness = await httpProbe(config.harness.healthUrl, { timeoutMs: config.health.timeoutMs });
+    lines.push(`probe proxy:   ${proxy.ok ? 'UP' : 'DOWN'} (${proxy.detail}, ${proxy.ms}ms)`);
+    lines.push(`probe harness: ${harness.ok ? 'UP' : 'DOWN'} (${harness.detail}, ${harness.ms}ms)`);
+    if (!proxy.ok || !harness.ok) {
+      process.stdout.write(`${lines.join('\n')}\n`);
+      return 1;
+    }
+  }
+  process.stdout.write(`${lines.join('\n')}\n`);
+  return 0;
+}
+
+async function commandWait(flags) {
+  const config = loadConfig();
+  const target = String(flags.target ?? 'all');
+  const timeout = Number(flags.timeout ?? 300_000);
+  const checks = [];
+  if (target === 'proxy' || target === 'all') {
+    checks.push({
+      name: 'proxy',
+      run: () => httpProbe(config.proxy.healthUrl, { timeoutMs: config.health.timeoutMs, expectJsonOk: config.proxy.expectJsonOk }),
+    });
+  }
+  if (target === 'harness' || target === 'all') {
+    checks.push({ name: 'harness', run: () => httpProbe(config.harness.healthUrl, { timeoutMs: config.health.timeoutMs }) });
+  }
+  if (target === 'network') {
+    checks.push({ name: 'network', run: () => tcpProbe(config.network.host, config.network.port, 5_000) });
+  }
+  if (checks.length === 0) {
+    process.stderr.write(`unknown --target ${target} (proxy|harness|all|network)\n`);
+    return 2;
+  }
+  const results = await Promise.all(
+    checks.map((check) => waitUntil(check.run, { timeoutMs: timeout, intervalMs: 1_000 })),
+  );
+  let ok = true;
+  results.forEach((result, index) => {
+    const status = result.ok ? 'READY' : 'TIMEOUT';
+    if (!result.ok) ok = false;
+    process.stdout.write(`${checks[index].name}: ${status} (${result.detail}, ${result.attempts} attempt(s))\n`);
+  });
+  return ok ? 0 : 1;
+}
+
+async function commandSelftest() {
+  const config = loadConfig();
+  const lines = [];
+  let ok = true;
+  const check = (name, pass, detail) => {
+    if (!pass) ok = false;
+    lines.push(`${pass ? 'PASS' : 'FAIL'}  ${name}${detail === undefined ? '' : `: ${detail}`}`);
+  };
+
+  check('config', true, `${config.configFile}`);
+  check('node', true, process.version);
+  check('dsh binary', exists(config.harness.command), config.harness.command);
+  if (config.proxy.mode === 'own') check('proxy binary', exists(config.proxy.command[0]), config.proxy.command[0]);
+  if (config.tunnel.mode === 'own') check('tunnel binary', exists(config.tunnel.command[0]), config.tunnel.command[0]);
+  check('state dir', (() => {
+    try {
+      fs.mkdirSync(config.stateDir, { recursive: true });
+      fs.accessSync(config.stateDir, fs.constants.W_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  })(), config.stateDir);
+
+  const network = await tcpProbe(config.network.host, config.network.port, 5_000);
+  check('network uplink', network.ok, `${config.network.host}:${config.network.port} ${network.detail}`);
+
+  const proxy = await httpProbe(config.proxy.healthUrl, { timeoutMs: config.health.timeoutMs, expectJsonOk: config.proxy.expectJsonOk });
+  check('proxy health', proxy.ok, `${config.proxy.healthUrl} ${proxy.detail} in ${proxy.ms}ms`);
+
+  const harness = await httpProbe(config.harness.healthUrl, { timeoutMs: config.health.timeoutMs });
+  check('harness health', harness.ok, `${config.harness.healthUrl} ${harness.detail} in ${harness.ms}ms`);
+
+  const keeperFile = config.keeper.statusFile;
+  if (readable(keeperFile)) {
+    try {
+      const keeper = JSON.parse(fs.readFileSync(keeperFile, 'utf8'));
+      check('session keeper', true, `phase=${keeper?.summary?.phase} scanned=${keeper?.summary?.scanned} interrupted=${keeper?.summary?.candidates} resumed=${keeper?.summary?.resumed?.length ?? 0}`);
+    } catch (error) {
+      check('session keeper', false, `${keeperFile} unreadable: ${/** @type {Error} */ (error).message}`);
+    }
+  } else {
+    lines.push(`SKIP  session keeper: ${keeperFile} not written yet (plugin not installed, or no boot pass since install)`);
+  }
+
+  const scan = scanInterrupted({ dshHome: config.dshHome, limit: 500 });
+  lines.push(`INFO  session store: ${scan.scanned} scanned, ${scan.interrupted.length} with an open turn, ${scan.errors.length} unreadable`);
+  for (const entry of scan.interrupted.slice(0, 5)) {
+    lines.push(`        ${entry.sessionId}  turn=${entry.analysis.turn}  seq=${entry.analysis.turnStartSeq}  ${entry.header.cwd ?? '—'}`);
+  }
+
+  process.stdout.write(`${lines.join('\n')}\n`);
+  return ok ? 0 : 1;
+}
+
+async function commandDoctor() {
+  const config = loadConfig();
+  const lines = [];
+  let problems = 0;
+  const line = (status, name, detail) => {
+    if (status === 'FAIL') problems += 1;
+    lines.push(`${status.padEnd(5)} ${name}${detail === undefined ? '' : `: ${detail}`}`);
+  };
+
+  line('INFO', 'config file', config.configFile);
+  line('INFO', 'state dir', config.stateDir);
+  line('INFO', 'dsh home', config.dshHome);
+  line('INFO', 'harness', `${config.harness.command} web --port ${config.harness.port}${config.harness.mode === 'own' ? '' : ' (external)'}`);
+  line('INFO', `proxy (${config.proxy.mode})`, config.proxy.healthUrl);
+  line('INFO', `tunnel (${config.tunnel.mode})`, config.tunnel.mode === 'own' ? config.tunnel.command.join(' ') : '—');
+
+  if (!exists(config.harness.command)) line('FAIL', 'dsh binary missing or not executable', config.harness.command);
+  if (config.proxy.mode === 'own') {
+    if (!exists(config.proxy.command[0])) line('FAIL', 'proxy binary missing or not executable', config.proxy.command[0]);
+    if (!fs.existsSync(config.proxy.cwd)) line('FAIL', 'proxy working directory missing', config.proxy.cwd);
+    for (const [key, value] of Object.entries(config.proxy.env ?? {})) {
+      if (key.endsWith('_FILE') && typeof value === 'string' && !fs.existsSync(value)) {
+        line('WARN', `proxy ${key} does not exist yet`, value);
+      }
+    }
+  }
+  if (config.tunnel.mode === 'own' && !exists(config.tunnel.command[0])) {
+    line('WARN', 'tunnel binary missing (boot continues without a public URL)', config.tunnel.command[0]);
+  }
+  try {
+    fs.mkdirSync(config.stateDir, { recursive: true });
+    fs.accessSync(config.stateDir, fs.constants.W_OK);
+    line('OK', 'state dir writable');
+  } catch (error) {
+    line('FAIL', 'state dir not writable', /** @type {Error} */ (error).message);
+  }
+  if (!fs.existsSync(config.dshHome)) line('WARN', 'dsh home missing (harness will create it)', config.dshHome);
+  const keeperDir = path.dirname(config.keeper.statusFile);
+  line(
+    fs.existsSync(keeperDir) ? 'OK' : 'INFO',
+    'session-keeper state dir',
+    fs.existsSync(keeperDir) ? keeperDir : `${keeperDir} (created by the plugin on its first pass)`,
+  );
+
+  const proxy = await httpProbe(config.proxy.healthUrl, { timeoutMs: 3_000, expectJsonOk: config.proxy.expectJsonOk });
+  line(proxy.ok ? 'OK' : 'WARN', 'proxy currently', proxy.detail);
+  const harness = await httpProbe(config.harness.healthUrl, { timeoutMs: 3_000 });
+  line(harness.ok ? 'OK' : 'WARN', 'harness currently', harness.detail);
+
+  lines.push(`\n${problems === 0 ? 'doctor: no blocking problems' : `doctor: ${problems} blocking problem(s)`}`);
+  process.stdout.write(`${lines.join('\n')}\n`);
+  return problems === 0 ? 0 : 1;
+}
+
+async function commandSessions(flags) {
+  const config = loadConfig();
+  const scan = scanInterrupted({
+    dshHome: config.dshHome,
+    limit: Number(flags.limit ?? 500),
+  });
+  const all = flags.all === true;
+  const rows = all ? scan.interrupted : scan.resumable;
+  if (flags.json === true) {
+    process.stdout.write(
+      `${JSON.stringify(
+        {
+          dshHome: config.dshHome,
+          scanned: scan.scanned,
+          balanced: scan.balanced,
+          openTurn: scan.interrupted.length,
+          resumable: scan.resumable.length,
+          children: scan.children,
+          interrupted: rows.map((entry) => ({
+            sessionId: entry.sessionId,
+            project: entry.project,
+            cwd: entry.header.cwd ?? null,
+            origin: entry.header.origin ?? null,
+            eligible: entry.eligible,
+            turn: entry.analysis.turn,
+            turnStartSeq: entry.analysis.turnStartSeq,
+            stepOpen: entry.analysis.stepOpen,
+            sizeBytes: entry.sizeBytes,
+            mtime: entry.mtime,
+            lastEventTime: entry.analysis.lastEventTime ?? null,
+            requestPreview: entry.analysis.pendingUserTexts[0]?.slice(0, 160) ?? null,
+          })),
+          errors: scan.errors,
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    return 0;
+  }
+
+  const lines = [
+    `session store: ${config.dshHome}/sessions`,
+    `scanned ${scan.scanned}, balanced ${scan.balanced}, open-turn ${scan.interrupted.length} (${scan.resumable.length} candidate(s), ${scan.children} subagent child/children), unreadable ${scan.errors.length}`,
+    '',
+  ];
+  if (rows.length === 0) {
+    lines.push(
+      all
+        ? 'No stored session ends inside an open turn.'
+        : 'No resumable session ends inside an open turn.',
+    );
+    if (!all && scan.children > 0) lines.push(`(${scan.children} subagent child session(s) end open as well; they are owned by their parent — see --all.)`);
+  } else {
+    lines.push('Sessions whose last turn never closed. A session live in a running Harness looks like this too;');
+    lines.push('only the in-process keeper can tell them apart (it skips live agents and subagent children):');
+    for (const entry of rows) {
+      const request = (entry.analysis.pendingUserTexts[0] ?? '').replace(/\s+/g, ' ').slice(0, 90);
+      lines.push(
+        `  ${entry.sessionId}${entry.eligible === false ? '  [subagent child]' : ''}\n    cwd=${entry.header.cwd ?? '—'}  turn=${entry.analysis.turn ?? '?'}  seq=${entry.analysis.turnStartSeq ?? '?'}  size=${Math.round(entry.sizeBytes / 1024)}KiB  last-event=${entry.analysis.lastEventTime === undefined ? '—' : new Date(entry.analysis.lastEventTime).toISOString()}\n    request: ${request || '(not in window)'}`,
+      );
+    }
+  }
+  for (const error of scan.errors.slice(0, 10)) lines.push(`  ! ${error.file}: ${error.error}`);
+  process.stdout.write(`${lines.join('\n')}\n`);
+  return 0;
+}
+
+async function commandConfig() {
+  const config = loadConfig();
+  process.stdout.write(`${JSON.stringify(config, null, 2)}\n`);
+  return 0;
+}
+
+async function main() {
+  const argv = process.argv.slice(2);
+  if (argv.length === 0 || argv[0] === 'help' || argv[0] === '--help' || argv[0] === '-h') {
+    process.stdout.write(USAGE);
+    return argv.length === 0 ? 2 : 0;
+  }
+  const command = argv[0];
+  const flags = parseArgs(argv.slice(1));
+  switch (command) {
+    case 'run':
+      return commandRun();
+    case 'status':
+      return commandStatus(flags);
+    case 'wait':
+      return commandWait(flags);
+    case 'selftest':
+      return commandSelftest();
+    case 'doctor':
+      return commandDoctor();
+    case 'sessions':
+      return commandSessions(flags);
+    case 'config':
+      return commandConfig();
+    case 'version':
+    case '--version':
+    case '-V':
+      process.stdout.write(`dsh-stack ${VERSION}\n`);
+      return 0;
+    default:
+      process.stderr.write(`unknown command "${command}"\n\n${USAGE}`);
+      return 2;
+  }
+}
+
+main()
+  .then((code) => {
+    if (code !== undefined) process.exitCode = code;
+  })
+  .catch((error) => {
+    process.stderr.write(`dsh-stack: ${error instanceof Error ? `${error.name}: ${error.message}` : String(error)}\n`);
+    if (error instanceof Error && error.stack) process.stderr.write(`${error.stack.split('\n').slice(1, 6).join('\n')}\n`);
+    process.exitCode = 1;
+  });

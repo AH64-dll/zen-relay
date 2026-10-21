@@ -5,6 +5,13 @@ zen-router/lanes.json
 zen-router/burned.json
 zen-router/*.tmp
 zen-router/*.log
+config/settings.json
+
+# Stack runtime
+stack/node_modules/
+stack/stack.log
+stack/*.log
+*.log
 
 # Build/cache artifacts
 **/target/
