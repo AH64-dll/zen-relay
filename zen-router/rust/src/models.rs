@@ -4,7 +4,7 @@
 //! the key cannot serve are resolved to a free one.
 use crate::config::now;
 use crate::relay::upstream_headers;
-use crate::state::AppState;
+use crate::state::{logline, AppState};
 use bytes::Bytes;
 use serde_json::{json, Value};
 use std::time::Duration;
@@ -135,6 +135,46 @@ pub async fn fallback_model(st: &AppState) -> String {
     c.fallback = Some(chosen.clone());
     c.fallback_at = now();
     chosen
+}
+
+/// Keep `probe_model` on a model the free tier actually serves.
+///
+/// Stage-2 probes are full completions: if the configured probe model is not
+/// shippable (renamed, retired, or a typo) every probe answers 400/404, no lane
+/// is ever promoted, and the pool silently never warms. This picks a live
+/// `-free` model instead — the models list is cached for an hour, so it costs
+/// nothing on every pool-manager tick.
+pub async fn ensure_probe_model(st: &AppState) {
+    let current = st.rt().probe_model;
+    let (status, _, body) = get_models_cached(st).await;
+    if status != 200 {
+        return;
+    }
+    let Ok(d) = serde_json::from_slice::<Value>(&body) else { return };
+    let Some(rows) = d.get("data").and_then(|v| v.as_array()) else { return };
+    let ids: Vec<&str> = rows
+        .iter()
+        .filter_map(|m| m.get("id").and_then(|v| v.as_str()))
+        .collect();
+    if ids.is_empty() || ids.contains(&current.as_str()) {
+        return;
+    }
+    let Some(pick) = ids
+        .iter()
+        .copied()
+        .find(|i| i.ends_with("-free"))
+        .or_else(|| ids.first().copied())
+    else {
+        return;
+    };
+    {
+        let mut s = st.settings.write().unwrap();
+        s.probe_model = pick.to_string();
+    }
+    st.save_settings();
+    logline(&format!(
+        "probe_model \"{current}\" is not served upstream — switched to \"{pick}\""
+    ));
 }
 
 pub async fn resolve_model(st: &AppState, model: &str) -> String {

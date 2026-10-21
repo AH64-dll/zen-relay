@@ -20,6 +20,12 @@ async fn main() {
     let paths = Paths::from_env();
     let mut settings = Settings::load(&paths.settings);
 
+    // These files carry the relay key, upstream keys and proxy credentials;
+    // fix the mode on installs created before 0600 writes existed.
+    for p in [&paths.settings, &paths.lanes, &paths.burned] {
+        config::restrict_permissions(p);
+    }
+
     // Refuse to run as an open relay on the loopback port: bind a generated
     // key into the settings file so every client (the harness included) has
     // to send it. Same rule as the Python relay.
@@ -29,10 +35,13 @@ async fn main() {
             .unwrap_or(false);
         if !allow_anon {
             let key = format!("rly_{}", uuid::Uuid::new_v4().simple());
-            settings.relay_api_key = key.clone();
+            // Never print the key itself: stdout ends up in terminals, CI logs
+            // and journald, and this is the only thing guarding the relay.
+            let shown = if key.len() > 8 { format!("{}…", &key[..8]) } else { "…".into() };
+            settings.relay_api_key = key;
             let _ = settings.save(&paths.settings);
             logline(&format!(
-                "SECURITY: no relay_api_key was configured — generated {key} and saved it to {}",
+                "SECURITY: no relay_api_key was configured — generated {shown} and saved it to {} (read it from that file)",
                 paths.settings.display()
             ));
         }
@@ -71,6 +80,7 @@ async fn main() {
         .and_then(|p| p.parse().ok())
         .unwrap_or(8901);
     let addr = format!("{host}:{port}");
+    let loopback = host == "localhost" || host == "::1" || host.starts_with("127.");
     let listener = match tokio::net::TcpListener::bind(&addr).await {
         Ok(l) => l,
         Err(e) => {
@@ -78,7 +88,14 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    logline(&format!("zen-relay {VERSION} listening on {addr} (loopback only)"));
+    if loopback {
+        logline(&format!("zen-relay {VERSION} listening on {addr} (loopback only)"));
+    } else {
+        // The old log claimed "loopback only" no matter what HOST was.
+        logline(&format!(
+            "zen-relay {VERSION} listening on {addr} — WARNING: not a loopback address; anyone who can reach this port and has the key can spend your egress"
+        ));
+    }
     if let Err(e) = axum::serve(listener, app).await {
         eprintln!("zen-relay: server error: {e}");
         std::process::exit(1);

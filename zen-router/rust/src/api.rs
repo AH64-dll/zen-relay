@@ -3,7 +3,7 @@
 use crate::config::{now, Settings, VERSION};
 use crate::models::{get_models_cached, resolve_model};
 use crate::relay::{ensure_read_tool, relay_nonstream, relay_stream};
-use crate::state::{ct_eq, display_addr, AppState};
+use crate::state::{ct_eq, display_addr, redact_addr, AppState};
 use axum::body::Body;
 use axum::extract::{Query, Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
@@ -44,6 +44,43 @@ fn bytes_resp(status: u16, ct: &str, body: Bytes) -> Response {
         )
         .body(Body::from(body))
         .unwrap()
+}
+
+/// Hop-by-hop and transport headers that must not be copied onto our own
+/// response: we always send a buffered body, so upstream framing (chunked
+/// encoding, a content-length for a different representation) would corrupt it.
+const DROP_HEADERS: &[&str] = &[
+    "content-length",
+    "transfer-encoding",
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "upgrade",
+];
+
+/// Build a response from upstream status + headers without ever panicking.
+/// The old code fed upstream headers into `Response::builder()` and unwrapped,
+/// so one malformed header from a hostile proxy killed the request task.
+fn upstream_response(status: StatusCode, headers: &HeaderMap, body: Body) -> Response {
+    let mut resp = Response::new(body);
+    *resp.status_mut() = status;
+    let out = resp.headers_mut();
+    for (k, v) in headers.iter() {
+        if DROP_HEADERS.contains(&k.as_str()) {
+            continue;
+        }
+        out.insert(k.clone(), v.clone());
+    }
+    if !out.contains_key("content-type") {
+        out.insert(
+            axum::http::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+    }
+    resp
 }
 
 pub async fn healthz(State(st): State<Arc<AppState>>) -> Response {
@@ -113,24 +150,16 @@ pub async fn chat_completions(State(st): State<Arc<AppState>>, req: Request) -> 
     if stream {
         let (status, h, bytes, body_opt) =
             relay_stream(st.clone(), payload, "chat/completions", headers, 300.0).await;
-        let mut rb = Response::builder().status(status);
-        for (k, v) in h.iter() {
-            rb = rb.header(k, v);
-        }
         let b = match body_opt {
             Some(b) => b,
             None => Body::from(bytes),
         };
-        return rb.body(b).unwrap();
+        return upstream_response(status, &h, b);
     }
 
     let (status, h, bytes) =
         relay_nonstream(&st, &payload, "chat/completions", &headers, 120.0).await;
-    let mut rb = Response::builder().status(status);
-    for (k, v) in h.iter() {
-        rb = rb.header(k, v);
-    }
-    rb.body(Body::from(bytes)).unwrap()
+    upstream_response(status, &h, Body::from(bytes))
 }
 
 pub async fn api_stats(State(st): State<Arc<AppState>>, req: Request) -> Response {
@@ -208,7 +237,7 @@ pub async fn api_pool(
         let ln = pool.lanes.get(k).unwrap();
         json!({
             "addr": display_addr(&ln.addr),
-            "raw_addr": ln.addr,
+            "raw_addr": redact_addr(&ln.addr),
             "proto": ln.proto,
             "score": (ln.score * 10000.0).round() / 10000.0,
             "lat_ms": (ln.lat_ms * 10.0).round() / 10.0,
@@ -280,8 +309,10 @@ pub async fn settings_post(State(st): State<Arc<AppState>>, req: Request) -> Res
         return json_resp(400, &json!({"error": "invalid settings", "details": errors}));
     }
     st.save_settings();
+    // Never echo secrets back: `public()` masks the relay key, upstream keys
+    // and the webshare token (this handler used to serialize the raw struct).
     let s = st.settings.read().unwrap();
-    json_resp(200, &serde_json::to_value(&*s).unwrap_or(json!({})))
+    json_resp(200, &s.public())
 }
 
 pub async fn api_refresh(State(st): State<Arc<AppState>>, req: Request) -> Response {
@@ -391,4 +422,25 @@ pub async fn api_burned_clear(State(st): State<Arc<AppState>>, req: Request) -> 
     };
     st.save_burned();
     json_resp(200, &json!({"cleared": n}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn upstream_response_drops_framing_headers_and_never_panics() {
+        let mut h = HeaderMap::new();
+        h.insert("content-length", HeaderValue::from_static("999"));
+        h.insert("transfer-encoding", HeaderValue::from_static("chunked"));
+        h.insert("connection", HeaderValue::from_static("keep-alive"));
+        h.insert("x-upstream", HeaderValue::from_static("ok"));
+        let r = upstream_response(StatusCode::OK, &h, Body::from("hi"));
+        assert_eq!(r.status(), StatusCode::OK);
+        assert!(r.headers().get("content-length").is_none());
+        assert!(r.headers().get("transfer-encoding").is_none());
+        assert!(r.headers().get("connection").is_none());
+        assert_eq!(r.headers().get("x-upstream").unwrap(), "ok");
+        assert_eq!(r.headers().get("content-type").unwrap(), "application/json");
+    }
 }

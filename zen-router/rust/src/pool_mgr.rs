@@ -369,7 +369,6 @@ fn proxy_scheme(proto: &str) -> &'static str {
 async fn screen(proxy_url: &str, rt: &Runtime) -> bool {
     let Ok(proxy) = reqwest::Proxy::all(proxy_url) else { return false };
     let Ok(c) = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
         .no_proxy()
         .proxy(proxy)
         .timeout(Duration::from_secs(4))
@@ -401,7 +400,6 @@ async fn stage2(
         return Err("proxy");
     };
     let Ok(client) = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
         .no_proxy()
         .proxy(proxy)
         .timeout(Duration::from_secs(rt.probe_timeout))
@@ -820,7 +818,6 @@ pub async fn revalidate_warm(st: &AppState) {
                 let result: Result<(u16, f64), ()> = async {
                     let Ok(proxy) = reqwest::Proxy::all(&proxy_url) else { return Err(()) };
                     let Ok(c) = reqwest::Client::builder()
-                        .danger_accept_invalid_certs(true)
                         .no_proxy()
                         .proxy(proxy)
                         .connect_timeout(Duration::from_secs(4))
@@ -960,6 +957,9 @@ pub fn ensure_direct_lane(st: &AppState, rt: &Runtime) {
 pub async fn pool_manager(st: Arc<AppState>) {
     loop {
         {
+            // A retired probe model would stall every stage-2 probe and leave
+            // the pool permanently empty; this is a cached call (1h TTL).
+            crate::models::ensure_probe_model(&st).await;
             let rt = st.rt();
             let warm = st.pool.lock().unwrap().warm_keys().len();
             let paused = st.quota_paused();
