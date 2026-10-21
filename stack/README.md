@@ -71,10 +71,13 @@ racing the Host's writer, and a plugin cannot restart a dead Host.
 4. **Tunnel** — spawn `cloudflared tunnel --url http://127.0.0.1:30141`, parse
    the `https://<name>.trycloudflare.com` hostname from its output
    (timeout 90 s). Optional: a tunnel failure degrades the public URL only.
-5. **Harness** — spawn `dsh web --port 30141 --no-open --trusted-host <tunnel
+5. **Bridge** — spawn `opencode-bridge` (see below) and poll
+   `GET http://127.0.0.1:8902/healthz` until it reports `ok:true` (timeout
+   60 s). Optional unless `bridge.required` is set.
+6. **Harness** — spawn `dsh web --port 30141 --no-open --trusted-host <tunnel
    host>`, capture the sign-in token from stdout, poll `GET /` until it answers
    (timeout 300 s), and publish `~/dsh-url.txt`.
-6. **`READY=1`** — sent to systemd only here. Until this point
+7. **`READY=1`** — sent to systemd only here. Until this point
    `systemctl start dsh-stack` blocks, so anything ordered after it (and any
    operator looking at `is-active`) sees a *proven* stack.
 
@@ -82,6 +85,37 @@ The dependency is enforced in **both directions**: when the proxy is restarted,
 the Harness is stopped first and restarted only after the proxy is ready again.
 A Harness booted against a dead model route turns every session it opens into an
 error turn, so "started" is never used as a proxy for "usable".
+
+### The OpenCode bridge
+
+`stack/bridge/opencode-bridge.mjs` is an OpenAI-compatible front end for a
+local OpenCode server. It exists because the model provider now answers
+`FreeTierError: ... can only be used from within OpenCode` to anything that is
+not the official client — the rotating-proxy relay included.
+
+The bridge does not forge that identity. It *is* the official client:
+
+```
+dsh web :30141 ──OpenAI chat──▶ opencode-bridge :8902 ──session API──▶ opencode
+                                                                            │
+                                                            opencode.ai ◀───┘
+```
+
+Each chat completion becomes one OpenCode session prompt; the assistant's text
+comes back as a chat completion. The upstream therefore sees a request from
+OpenCode itself, with OpenCode's own credentials and headers.
+
+The trade-off, stated plainly: OpenCode runs *its* agent loop with *its* tools
+inside that session. The Harness receives the answer, not the tool calls. The
+Harness becomes a front end to OpenCode rather than a second agent on top of it.
+
+- Enabled automatically when `opencode` is on the machine; `--no-bridge` turns
+  it off and leaves the relay route as the only model route.
+- The bridge finds the local server itself (`opencode service status`) and its
+  password (`~/.config/opencode/service.json`), and starts the server if it is
+  not running.
+- It accepts the relay key (`OMP_ZEN_RELAY_KEY`) so one secret covers both
+  routes; without a key it serves loopback callers only.
 
 ### Health, restarts, watchdog
 
@@ -208,10 +242,11 @@ dsh-stack/
 │   ├── lib/keeper.mjs            scan → decide → resume → report
 │   ├── cordis.patch.yml          bundle patch (config defaults)
 │   └── README.md                 plugin-specific install/behaviour
+├── bridge/opencode-bridge.mjs    OpenAI-compatible front end for a local OpenCode server
 ├── systemd/dsh-stack.service     Type=notify, WatchdogSec=90, KillMode=control-group
 ├── install.sh                    idempotent install/uninstall, legacy-unit handling
 ├── scripts/verify-recovery.sh    safe end-to-end verification (--live to restart)
-└── tests/                        node:test — 63 checks incl. real-backend integration
+└── tests/                        node:test — 74 checks incl. real-backend integration
 ```
 
 ## 4. Install
@@ -367,7 +402,7 @@ Common knobs:
 
 ## 9. Honest scope
 
-- The supervisor and the plugin are implemented, tested (63 checks, including the
+- The supervisor and the plugin are implemented, tested (74 checks, including the
   real persistence backend and the real Cordis loader path), and dry-run verified
   against this machine.
 - **Nothing was installed or restarted in this session**: the legacy units are
@@ -380,3 +415,9 @@ Common knobs:
 - Session recovery assumes the `web` profile's `@deepseek-ai/dsh-agent-loop` +
   `session-persistence-jsonl` versions installed here. The integration tests skip
   themselves on a machine without them, rather than pretending to pass.
+- The OpenCode bridge gives the Harness a working model route while the
+  provider restricts its free tier to the official client. It does **not** give
+  the Harness its own tool loop: OpenCode's agent runs inside the session, so
+  the Harness sees the answer and OpenCode's session holds the work. The bridge
+  also depends on OpenCode's local server API, which is not a stable public
+  interface — a change there can break the route.

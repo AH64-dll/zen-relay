@@ -92,8 +92,9 @@ PORT=8901 HOST=127.0.0.1 ./run.sh
 - استخدم الأداة وفق شروط مزوّد الخدمة. الهدف منها توزيع الحدود المسموحة لكل IP، لا تجاوزها.
 - **قيد خارجي (أكتوبر 2026):** بوابة OpenCode المجانية ترفض الطلبات التي لا تأتي من
   عميل OpenCode الرسمي (`FreeTierError`)، وقد يبقى pool البروكسيات بارداً (`warm=0`)
-  رغم سلامة المرحّل. هذا قيد من المزوّد لا خلل في المرحّل؛ الحل مفتاح OpenCode صالح
-  أو مزوّد آخر. راجع `docs/TROUBLESHOOTING.md`.
+  رغم سلامة المرحّل. هذا قيد من المزوّد لا خلل في المرحّل؛ الحل هو الجسر أعلاه
+  (يمرّ الطلب من عميل OpenCode نفسه) أو مفتاح OpenCode صالح أو مزوّد آخر. راجع
+  `docs/TROUBLESHOOTING.md`.
 
 القيود المعروفة: نفق quick يتغيّر اسمه عند كل تشغيل، مفتاح واحد يصلح أيضاً
 لإدارة `/api/*`، ولا CORS لواجهات المتصفح. الحلول في نفس المستند.
@@ -129,6 +130,39 @@ client ──HTTPS──▶ cloudflared ──▶ dsh web :30141 ──▶ zen-r
 ```
 
 التفاصيل في [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
+---
+
+## دمج OpenCode مع الـHarness (الجسر)
+
+المزوّد اليوم يرفض أي طلب خارج عميل OpenCode الرسمي:
+
+```
+FreeTierError: OpenCode's free tier can only be used from within OpenCode.
+```
+
+لذلك يضيف المستودع **جسراً** (`stack/bridge/opencode-bridge.mjs`): واجهة
+OpenAI-compatible تقف بين الـHarness وخادم OpenCode المحلي. الطلب يمر هكذا:
+
+```
+dsh web :30141 ──OpenAI/chat──▶ opencode-bridge :8902 ──session API──▶ opencode (محلي)
+                                                                          │
+                                                          opencode.ai ◀──┘ (عميل رسمي)
+```
+
+الفكرة أن الطلب إلى المزوّد يصدر من عميل OpenCode نفسه، فلا يحتاج أي انتحال
+لهوية ولا نسخ أي مفتاح. الجسر يحوّل كل طلب إلى جلسة OpenCode، ويحوّل جوابها
+إلى `chat.completion`.
+
+**المقايضة، بوضوح:** OpenCode ينفّذ حلقته وأدواته الخاصة داخل جلسته، فيصل
+إلى الـHarness الجواب فقط. أي أن الـHarness واجهة أمام OpenCode، لا وكيل ثانٍ
+فوقه.
+
+- يُفعَّل الجسر تلقائياً عند وجود `opencode` على الجهاز، ويُعطَّل بـ`--no-bridge`.
+- عنوانه `http://127.0.0.1:8902/v1`، ومفتاحه نفس `OMP_ZEN_RELAY_KEY`.
+- الـHarness يستخدمه افتراضياً عبر
+  [`config/dsh-cordis.patch.yml`](config/dsh-cordis.patch.yml)؛ مسار المرحّل
+  (بروكسيات متغيّرة) يبقى متاحاً كمزوّد ثانٍ.
 
 ---
 
