@@ -5,12 +5,16 @@
 # store through `apiKeyEnv`, so this file stays safe to commit.
 #
 # Put the key in place once (the value is the `relay_api_key` from
-# zen-router/settings.json):
+# zen-router/settings.json). The process environment wins over the credential
+# store, so a systemd drop-in is the most predictable place:
 #
-#   dsh config credentials set OMP_ZEN_RELAY_KEY rly_...
+#   mkdir -p ~/.config/systemd/user/dsh-stack.service.d
+#   printf '[Service]\nEnvironment=OMP_ZEN_RELAY_KEY=%s\n' rly_... \
+#     > ~/.config/systemd/user/dsh-stack.service.d/relay-key.conf
+#   chmod 600 ~/.config/systemd/user/dsh-stack.service.d/relay-key.conf
+#   systemctl --user daemon-reload && systemctl --user restart dsh-stack
 #
-# If your dsh build has no credentials CLI, export the variable in the unit:
-#   Environment=OMP_ZEN_RELAY_KEY=rly_...
+# Or write it to $DSH_HOME/.credentials.yaml under `refs:` (mode 0600).
 #
 # baseURL must stay loopback when the Harness and the relay share a machine.
 # For a relay on another host use https://<public-host>/v1 (see

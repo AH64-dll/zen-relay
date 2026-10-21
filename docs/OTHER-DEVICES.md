@@ -4,7 +4,7 @@
 ويشرح الطريقتين المدعومتين، والقيود المعروفة.
 
 > **مهم:** `zen-relay` ليس VPN ولا بروكسي شبكة. هو **خدمة متوافقة مع OpenAI API**
-> (`/v1/models`, `/v1/chat/completions`, `/v1/messages`). أي جهاز يستخدمه يجب أن
+> (`/v1/models`, `/v1/chat/completions`). أي جهاز يستخدمه يجب أن
 > يكون عميل OpenAI API: تطبيق، سكربت، أو الـHarness. لا يمكن توجيه تصفّح الجهاز
 > عبره، ولا يصلح كـ«سيرفر بروكسي» في تطبيقات VPN.
 
@@ -98,8 +98,8 @@ apiKeyEnv: OMP_ZEN_RELAY_KEY
 
 المفتاح في `apiKeyEnv` لا في الملف، كما في `config/dsh-cordis.patch.yml`.
 
-**Anthropic-شكل** — المسار `/v1/messages` مدعوم أيضاً، لذا يعمل مع عملاء
-Anthropic SDK بنفس المفتاح والعنوان.
+**Anthropic-شكل** — غير مدعوم في 1.1.7: `POST /v1/messages` يعيد 404. استخدم
+`/v1/chat/completions` أو عميل OpenAI-compatible.
 
 ---
 

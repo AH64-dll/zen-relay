@@ -73,8 +73,16 @@ sudo loginctl enable-linger $(id -un)
 مخزن الاعتماد (لا في الملف):
 
 ```bash
-dsh config credentials set OMP_ZEN_RELAY_KEY rly_...
+# الطريقة الأضمن: متغيّر بيئة في وحدة systemd
+mkdir -p ~/.config/systemd/user/dsh-stack.service.d
+printf '[Service]\nEnvironment=OMP_ZEN_RELAY_KEY=%s\n' "$(grep -oE 'rly_[0-9a-f]{32}' zen-router/settings.json | head -1)" \
+  > ~/.config/systemd/user/dsh-stack.service.d/relay-key.conf
+chmod 600 ~/.config/systemd/user/dsh-stack.service.d/relay-key.conf
+systemctl --user daemon-reload
 ```
+
+أو اكتبه في `~/.dsh/.credentials.yaml` تحت `refs:` ثم `chmod 600` عليه. الطرق
+الثلاث وأسبقيتها في [`SETUP-GUIDE.md`](SETUP-GUIDE.md).
 
 أعد التشغيل:
 
