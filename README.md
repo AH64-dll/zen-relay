@@ -20,7 +20,7 @@ Harness وتنشره على نفق HTTPS.
 | `stack/` | مشرف `dsh-stack` + plugin استئناف الجلسات `session-keeper` |
 | `config/` | إعدادات نموذجية: `settings.example.json`، وحدة systemd، وربط dsh، وCaddyfile |
 | `scripts/expose-relay.sh` | نشر المرحّل على نفق Cloudflare وطباعة العنوان والمفتاح |
-| `docs/` | المعمارية، التشغيل على أجهزة أخرى، التثبيت، استكشاف الأخطاء |
+| `docs/` | المعمارية، التشغيل على أجهزة أخرى، التثبيت، تجمّع البروكسي، استكشاف الأخطاء |
 
 ---
 
@@ -114,6 +114,9 @@ client ──HTTPS──▶ cloudflared ──▶ dsh web :30141 ──▶ zen-r
 - `upstream_user_agent`: بصمة OpenCode — بدونها ترفض الطبقة المجانية الطلب
 
 كل الحقول في [`config/settings.example.json`](config/settings.example.json).
+
+كل تفاصيل طبقة الخروج (المصادر الـ49، الفحص، الترتيب، `lanes.json` و
+`burned.json`، Webshare وTor) في [`docs/PROXY-POOL.md`](docs/PROXY-POOL.md).
 
 ---
 
