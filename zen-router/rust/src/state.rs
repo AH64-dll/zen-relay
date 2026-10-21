@@ -93,11 +93,24 @@ pub fn valid_addr(addr: &str) -> bool {
     if port == 0 || port > 65535 {
         return false;
     }
-    let octs: Vec<&str> = parts[0].split('.').collect();
-    if octs.len() != 4 {
-        return false;
+    let name = parts[0];
+    let octs: Vec<&str> = name.split('.').collect();
+    if octs.len() == 4 && octs.iter().all(|o| o.parse::<u32>().is_ok()) {
+        return octs.iter().all(|o| o.parse::<u32>().map(|v| v <= 255).unwrap_or(false));
     }
-    octs.iter().all(|o| o.parse::<u32>().map(|v| v <= 255).unwrap_or(false))
+    // DNS hostnames are valid proxy endpoints — the Webshare rotating
+    // gateway is p.webshare.io, and public lists occasionally carry names.
+    // Keep the bar at "plausible FQDN", not "reachable": the probe decides.
+    name.len() <= 253
+        && name.contains('.')
+        && name.chars().any(|c| c.is_ascii_alphabetic())
+        && name
+            .split('.')
+            .all(|l| !l.is_empty()
+                && l.len() <= 63
+                && l.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+                && !l.starts_with('-')
+                && !l.ends_with('-'))
 }
 
 pub fn ct_eq(a: &str, b: &str) -> bool {
@@ -1056,6 +1069,15 @@ mod tests {
         assert!(!valid_addr("bob:hunter2@1.2.3.4"));
         assert!(!valid_addr("bob:hunter2@1.2.3:8080"));
         assert!(!valid_addr("bob:hunter2@1.2.3.999:8080"));
+        // DNS hostnames are legitimate proxies: the webshare rotating gateway
+        // is `user-rotate:pass@p.webshare.io:80`, and a dotted-quad validator
+        // silently dropped it, making webshare_rotating a dead feature.
+        assert!(valid_addr("user-rotate:pass@p.webshare.io:80"));
+        assert!(valid_addr("proxy.example.com:3128"));
+        assert!(!valid_addr("not a host:8080"));
+        assert!(!valid_addr("-bad-.example.com:8080"));
+        assert!(!valid_addr("example..com:8080"));
+        assert_eq!(key_subnet("http://user-rotate:pass@p.webshare.io:80"), "p.webshare.io");
         // subnet grouping and IP extraction keep working with credentials
         assert_eq!(key_subnet("http://bob:hunter2@1.2.3.4:8080"), "1.2.3");
         assert_eq!(ip_of("bob:hunter2@1.2.3.4:8080"), "1.2.3.4");
