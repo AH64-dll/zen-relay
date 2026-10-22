@@ -14,6 +14,11 @@ DSH_STACK_DIR=${DSH_STACK_DIR:-$HOME/.config/dsh-stack}
 for d in "$HOME"/.nvm/versions/node/*/bin; do
   [ -x "$d/dsh" ] && PATH="$d:$PATH" && break
 done
+
+# The stack supervisor lives in the checkout.
+DSH_STACK_REPO=${DSH_STACK_REPO:-$HOME/Documents/zen-relay}
+[ -x "$DSH_STACK_REPO/stack/bin/dsh-stack" ] && PATH="$DSH_STACK_REPO/stack/bin:$PATH"
+
 export PATH
 
 if [ -f "$DSH_STACK_DIR/relay.env" ]; then
