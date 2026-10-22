@@ -113,6 +113,6 @@ dsh() {
     xdg-open "$url" >/dev/null 2>&1 &
   else
     echo
-    echo "Open the URL above in a browser (or run: dsh --no-open to just print it)."
+    echo "Open the URL above in your browser."
   fi
 }
