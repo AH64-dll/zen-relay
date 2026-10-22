@@ -66,6 +66,12 @@ dsh_up() {
 
 # --- `dsh` with no arguments opens the Harness ------------------------------
 dsh() {
+  local no_open=0
+  if [ "${1:-}" = "--no-open" ] || [ "${1:-}" = "-n" ]; then
+    no_open=1
+    shift
+  fi
+
   if [ $# -gt 0 ]; then
     if [ -z "${DSH_REAL_BIN:-}" ] || [ ! -x "$DSH_REAL_BIN" ]; then
       echo "dsh: the Harness CLI was not found (is nvm's node bin dir present?)" >&2
@@ -83,14 +89,19 @@ dsh() {
   }
 
   if ! dsh_up; then
-    echo "starting dsh-stack …"
-    systemctl --user start dsh-stack 2>/dev/null \
+    echo "starting dsh-stack … (this can take a minute: relay, bridge, harness)"
+    systemctl --user start --no-block dsh-stack 2>/dev/null \
       || echo "  (could not start the user unit; start it by hand)"
     local i
-    for i in $(seq 1 40); do
+    for i in $(seq 1 90); do
       dsh_up && break
       sleep 1
     done
+    if ! dsh_up; then
+      echo "dsh: the harness did not come up. Check:" >&2
+      echo "     dsh-stack status && journalctl --user -u dsh-stack -n 40" >&2
+      return 1
+    fi
     token=$(dsh_token) || true
   fi
 
@@ -98,10 +109,10 @@ dsh() {
   echo "Harness:  $url"
   [ -n "${DSH_URL:-}" ] && echo "Phone:    $DSH_URL"
 
-  if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && command -v xdg-open >/dev/null 2>&1; then
+  if [ "$no_open" = 0 ] && [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && command -v xdg-open >/dev/null 2>&1; then
     xdg-open "$url" >/dev/null 2>&1 &
   else
     echo
-    echo "No graphical session detected — open the URL above in a browser."
+    echo "Open the URL above in a browser (or run: dsh --no-open to just print it)."
   fi
 }
