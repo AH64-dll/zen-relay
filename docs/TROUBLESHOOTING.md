@@ -22,6 +22,28 @@
 | نفقان معاً / تقلّب الرابط | `pgrep -af cloudflared` | عطّل الوحدة القديمة: `systemctl --user disable --now cloudflared-tunnel` |
 | أجهزة أخرى تُحجب في المتصفح | لا CORS | استخدم عميلاً غير متصفح أو reverse proxy يضيف CORS |
 
+## تدوير IP الخروج مع الحفاظ على هوية العميل (proxychains)
+
+`opencode` لا يحترم `HTTPS_PROXY`/`https_proxy`/`ALL_PROXY` — يفتح TCP خاماً، لذا لا يمكن تمريره بمتغيرات البيئة. والبوابة تتطلب بصمة عميل OpenCode الحقيقية، فلا يكفي مجرد تغيير الـIP.
+
+الحل: `proxychains-ng` يعترض `connect()` عبر `LD_PRELOAD` فيمرّر اتصالات `opencode` عبر lanes المجلوبة من المرحّل، فيحتفظ بالبصمة الحقيقية ويدوّر IP الخروج.
+
+```bash
+sudo dnf install proxychains-ng
+scripts/proxychains-wrapper.sh   # يبني proxychains.conf من lanes الدافئة ويشغّل opencode serve
+```
+
+لجعل الجسر يشغّل الخدمة عبر الملف تلقائياً، اضبط في `~/.config/dsh-stack/config.json` تحت `bridge.env`:
+
+```json
+"OPENCODE_SERVICE_WRAPPER": "<repo>/scripts/proxychains-wrapper.sh"
+```
+
+ملاحظات:
+- `proxychains` يقرأ `proxychains.conf` مرة عند التحميل؛ `random_chain` + `chain_len = 1` يختار lane مختلفاً لكل اتصال TCP داخل العملية الواحدة.
+- إن ماتت الـlanes أعد بناء الملف بإعادة تشغيل `proxychains-wrapper.sh` بعد `curl /api/pool`.
+- الـREST relay (8901) يبقى للحصاد/الإحماء؛ مسار `/v1` القديم يمكن إيقافه بلا أثر على هذا المسار.
+
 ## أوامر نافعة
 
 ```bash

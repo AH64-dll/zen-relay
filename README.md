@@ -104,6 +104,10 @@ PORT=8901 HOST=127.0.0.1 ./run.sh
   الحقيقي. لذلك `stage2_probe` (مضبوط على `false` في `config/settings.example.json`)
   يرقّي الـlane بعد فحص connectivity رخيص، فيكون طلب العميل هو الأول عبر ذلك IP.
   `/healthz` يعرض الآن `warm` (lanes قابلة للوصول) و`proven` (lanes نجحت فعلاً).
+- **تدوير IP الخروج مع بقاء الهوية (1.2.0):** البوابة تقبل الآن عميل OpenCode
+  الرسمي فقط، لكن `opencode` يفتح TCP خاماً ويتجاهل `HTTPS_PROXY`. شغّل الخدمة
+  عبر `scripts/proxychains-wrapper.sh` (proxychains-ng) فيمرّ الطلب بالبصمة
+  الحقيقية عبر lane مختلفة لكل اتصال — راجع `docs/TROUBLESHOOTING.md`.
 
 القيود المعروفة: نفق quick يتغيّر اسمه عند كل تشغيل، مفتاح واحد يصلح أيضاً
 لإدارة `/api/*`، ولا CORS لواجهات المتصفح. الحلول في نفس المستند.

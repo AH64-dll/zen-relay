@@ -62,6 +62,7 @@ export function loadConfig(env = process.env) {
     opencodeBaseUrl: (env.OPENCODE_BASE_URL ?? 'http://127.0.0.1:49374').replace(/\/+$/, ''),
     opencodeBin: env.OPENCODE_BIN ?? 'opencode',
     opencodePassword: env.OPENCODE_PASSWORD ?? null,
+    serviceWrapper: (env.OPENCODE_SERVICE_WRAPPER ?? '').trim() || null,
     timeoutMs: Number(env.BRIDGE_TIMEOUT_MS ?? 300_000),
     directory: env.BRIDGE_DIRECTORY ?? null,
     version: VERSION,
@@ -229,12 +230,20 @@ export class OpenCodeClient {
       }
     };
     if (await probe()) return true;
+    // Launch the service through the proxychains wrapper when configured, so
+    // its upstream connections get rotating egress while keeping the real
+    // OpenCode client identity (required by the free-tier gate).
+    const launcher = this.config.serviceWrapper;
     try {
       await new Promise((resolve) => {
-        execFile(this.config.opencodeBin, ['service', 'start'], { timeout: 60_000 }, () => resolve(undefined));
+        if (launcher !== null) {
+          execFile(launcher, [], { timeout: 60_000, detached: true }, () => resolve(undefined));
+        } else {
+          execFile(this.config.opencodeBin, ['service', 'start'], { timeout: 60_000 }, () => resolve(undefined));
+        }
       });
     } catch {
-      // the CLI may not support `service start`; the server may already be up
+      // the launcher may fail; the server may already be up
     }
     const deadline = Date.now() + 60_000;
     while (Date.now() < deadline) {
