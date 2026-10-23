@@ -4,7 +4,7 @@
 # legitimate client instead of a forged fingerprint.
 set -uo pipefail
 cd /tmp/opencode
-export PATH=/home/amrhares/.opencode/bin:$PATH
+export PATH="$HOME/.opencode/bin:$PATH"
 export NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost
 
 shuf -n 150 fresh.txt > fresh.sample

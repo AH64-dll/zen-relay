@@ -51,13 +51,14 @@ Point the proxy component at this implementation (one-time):
 
 ```bash
 python3 - <<'EOF'
+import os
 import json
-f = '/home/amrhares/.config/dsh-stack/config.json'
+f = os.path.expanduser('~/.config/dsh-stack/config.json')
 c = json.load(open(f))
-rest = '/home/amrhares/Documents/zen-relay/zen-router/rest'
+rest = os.path.expanduser('~/Documents/zen-relay/zen-router/rest')
 c['proxy']['command'] = [f'{rest}/run.sh']
 c['proxy']['cwd'] = rest
-c['proxy']['env']['SETTINGS_FILE'] = '/home/amrhares/Documents/zen-relay/zen-router/settings.json'
+c['proxy']['env']['SETTINGS_FILE'] = os.path.expanduser('~/Documents/zen-relay/zen-router/settings.json')
 c['proxy']['env']['LANES_FILE'] = f'{rest}/lanes.json'
 c['proxy']['env']['BURNED_FILE'] = f'{rest}/burned.json'
 json.dump(c, open(f, 'w'), indent=2)
