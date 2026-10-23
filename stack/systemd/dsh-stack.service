@@ -27,7 +27,9 @@ RestartSec=3
 KillMode=control-group
 KillSignal=SIGTERM
 # Proxy + tunnel + Harness readiness (the Harness boot alone may take minutes).
-TimeoutStartSec=300
+TimeoutStartSec=900
+# A cold pool over ~200 proxy lists can legitimately need >5min to prove a
+# lane; the supervisor's own readyTimeoutMs is the real deadline.
 TimeoutStopSec=45
 # The daemon pings only while it is making progress, so a wedged supervisor is
 # restarted by systemd instead of lingering as a half-dead UI.

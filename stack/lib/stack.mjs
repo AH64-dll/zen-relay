@@ -313,6 +313,7 @@ export class Stack {
         logger: this.logger.child('proxy'),
         readyTimeoutMs: config.proxy.readyTimeoutMs,
         ready: () => this.proxyProbe(),
+        onProgress: () => { this.lastProgressAt = Date.now(); },
         // Liveness after boot: HTTP 200 means the process answers. A cold
         // proxy pool reports {"ok":false}; restarting the relay for that would
         // throw away the warming work and loop forever.
@@ -336,6 +337,7 @@ export class Stack {
         logger: this.logger.child('tunnel'),
         readyTimeoutMs: config.tunnel.readyTimeoutMs,
         onLine: (line) => this.observeTunnelLine(line),
+        onProgress: () => { this.lastProgressAt = Date.now(); },
         ready: async () => {
           if (this.tunnel.host !== undefined) return { ok: true, detail: `tunnel host ${this.tunnel.host}` };
           return { ok: false, detail: 'waiting for a tunnel hostname' };
@@ -357,6 +359,7 @@ export class Stack {
         ready: () => this.bridgeProbe(),
         probe: () => this.bridgeProbe(),
         onExit: () => this.kick('bridge-exited'),
+        onProgress: () => { this.lastProgressAt = Date.now(); },
       });
     }
     if (config.harness.mode === 'own' && this.components.harness === undefined) {
@@ -371,6 +374,7 @@ export class Stack {
         ready: () => this.harnessProbe(),
         probe: () => this.harnessProbe(),
         onExit: () => this.kick('harness-exited'),
+        onProgress: () => { this.lastProgressAt = Date.now(); },
       });
     }
   }

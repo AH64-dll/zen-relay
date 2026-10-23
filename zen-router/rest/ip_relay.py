@@ -82,6 +82,8 @@ DEFAULTS = {
     "webshare_token": "",             # optional Webshare free-tier API token
     "sources_enabled": True,          # pull public proxy lists (off = own lanes only)
     "allow_socks": True,              # use SOCKS4/5 sources (needs httpx[socks])
+    "stage2_probe": True,             # prove candidates with a real 1-token completion;
+                                      # false = screen-only, matches the Rust relay's fast path
     # v0.8: capacity + safety
     "lane_max_inflight": 2,           # concurrent requests allowed per lane
     "max_lanes_per_subnet": 3,        # /24 diversity cap (0 = unlimited)
@@ -201,6 +203,7 @@ LANE_RECOVER_SEC = DEFAULTS["lane_recover_sec"]
 DIRECT_LANE = DEFAULTS["direct_lane"]
 WEBSHARE_TOKEN = ""
 ALLOW_SOCKS = DEFAULTS["allow_socks"]
+STAGE2_PROBE = DEFAULTS["stage2_probe"]
 LANE_MAX_INFLIGHT = DEFAULTS["lane_max_inflight"]
 MAX_LANES_PER_SUBNET = DEFAULTS["max_lanes_per_subnet"]
 ADAPTIVE_CONCURRENCY = DEFAULTS["adaptive_concurrency"]
@@ -305,7 +308,7 @@ def apply_settings(new: dict, persist: bool = True) -> dict:
     global UPSTREAM_API_KEY, UPSTREAM_BASE_URL, RELAY_API_KEY, PROBE_MODEL, SCREEN_URL
     global POOL_TARGET, MAX_CANDIDATES, TEST_CONCURRENCY, PROBE_TIMEOUT
     global RELAY_PROXY_TIMEOUT, RELAY_ATTEMPTS, LANE_COOLDOWN_SEC, LANE_RECOVER_SEC
-    global DIRECT_LANE, WEBSHARE_TOKEN, ALLOW_SOCKS, SOURCES_ENABLED
+    global DIRECT_LANE, WEBSHARE_TOKEN, ALLOW_SOCKS, SOURCES_ENABLED, STAGE2_PROBE
     global LANE_MAX_INFLIGHT, MAX_LANES_PER_SUBNET, ADAPTIVE_CONCURRENCY, PERSIST_LANES
     global UPSTREAM_API_KEYS, UPSTREAM_UA
     global BURN_MEMORY, BURN_TTL_SEC, TOR_ENABLED, TOR_LANES, TOR_SOCKS_PORT, LANE_PIN_COUNT
@@ -334,6 +337,7 @@ def apply_settings(new: dict, persist: bool = True) -> dict:
     WEBSHARE_TOKEN = str(settings["webshare_token"]).strip()
     SOURCES_ENABLED = bool(settings.get("sources_enabled", DEFAULTS["sources_enabled"]))
     ALLOW_SOCKS = bool(settings["allow_socks"])
+    STAGE2_PROBE = bool(settings.get("stage2_probe", DEFAULTS["stage2_probe"]))
     LANE_MAX_INFLIGHT = max(1, int(settings["lane_max_inflight"]))
     MAX_LANES_PER_SUBNET = max(0, int(settings["max_lanes_per_subnet"]))
     ADAPTIVE_CONCURRENCY = bool(settings["adaptive_concurrency"])
@@ -1683,6 +1687,16 @@ async def _probe_candidate(key: str) -> Lane | None:
             if not await _screen(c):
                 _LAST_PROBE_ERR[key] = "proxy"   # proxy reached but screen failed
                 return None
+
+        # stage2_probe=false (the deployed default in settings.json): a clean
+        # reachability pass is enough — promote without spending the lane's
+        # one free request on a probe. The Rust relay ships the same toggle.
+        if not STAGE2_PROBE:
+            ln = Lane(addr, proto)
+            ln.mark_alive(0.0)
+            ln.probe_tries += 1
+            STATS["probes_ok"] += 1
+            return ln
 
         # Stage 2: real 1-token completion — proves the egress IP is not
         # quota-burned. Costs one token of THIS proxy IP's free budget, which is

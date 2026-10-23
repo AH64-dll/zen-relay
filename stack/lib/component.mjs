@@ -28,6 +28,8 @@ const MAX_LINE_BYTES = 1024 * 1024;
  * @property {() => Promise<{ok: boolean, detail: string}>} [probe]
  * @property {() => Promise<{ok: boolean, detail: string}>} [ready]
  * @property {number} [readyTimeoutMs]
+ * @property {() => void} [onProgress] — called on every readiness poll so the
+ *   supervisor knows a slow but working startup is still progress (watchdog).
  */
 
 export class Component {
@@ -41,6 +43,7 @@ export class Component {
     this.onLine = options.onLine;
     this.onExitHook = options.onExit;
     this.probeFn = options.probe;
+    this.onProgress = options.onProgress;
     this.readyFn = options.ready;
     this.readyTimeoutMs = options.readyTimeoutMs ?? 120_000;
 
@@ -116,6 +119,10 @@ export class Component {
     const result = await waitUntil(ready, {
       timeoutMs: this.readyTimeoutMs,
       intervalMs: 500,
+      // Each probe attempt proves the event loop is alive and the component is
+      // genuinely starting — count it as supervisor progress so systemd's
+      // watchdog is never withheld during a slow-but-healthy warmup.
+      onAttempt: () => this.onProgress?.(),
     });
     if (!result.ok) {
       this.lastError = result.detail;
