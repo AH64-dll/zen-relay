@@ -1093,7 +1093,42 @@ QUOTA_LANE_THRESHOLD = 3
 QUOTA_WINDOW_SEC = 45
 
 
-def _note_lane_429(addr: str) -> None:
+def _retry_after_sec(headers) -> float | None:
+    """Seconds upstream says to wait, from a `Retry-After` header.
+
+    This is the *precise* reset signal and it must be honoured: measured
+    2026-10-23, a spent free-tier IP answers with `Retry-After: ~16800-18600`
+    (seconds until 00:00 UTC, i.e. the daily reset). Re-probing that IP on a
+    1-hour cooldown burns a real completion against a wall that will not move
+    for hours — which is exactly what `_recover_parked` used to do.
+
+    Both delta-seconds and HTTP-date forms are accepted; anything unparseable
+    or non-positive returns None so callers fall back to the cooldown.
+    """
+    try:
+        raw = (headers or {}).get("retry-after") or (headers or {}).get("Retry-After")
+    except Exception:
+        return None
+    if not raw:
+        return None
+    raw = str(raw).strip()
+    try:
+        val = float(raw)
+        return val if val > 0 else None
+    except (TypeError, ValueError):
+        pass
+    try:
+        from email.utils import parsedate_to_datetime
+        when = parsedate_to_datetime(raw)
+        if when is None:
+            return None
+        delta = when.timestamp() - time.time()
+        return delta if delta > 0 else None
+    except Exception:
+        return None
+
+
+def _note_lane_429(addr: str, retry_after: float | None = None) -> None:
     """Record a per-IP 429.
 
     With the correct opencode UA in place, a 429 means THAT egress IP has spent
@@ -1111,6 +1146,20 @@ def _note_lane_429(addr: str) -> None:
     # recover on a 90s cooldown, so remembering it is what stops the prober
     # re-testing the same corpses every scrape cycle.
     mark_burned(addr, "relay-429")
+    # Honour upstream's own reset time when it gave one. The free tier answers
+    # 429 with Retry-After ≈ seconds-until-00:00-UTC (measured 16800-18600), so
+    # a 1h cooldown re-probes an IP that cannot recover for hours: every one of
+    # those re-probes spends a real completion to rediscover the same wall. The
+    # window is clamped to [LANE_COOLDOWN_SEC, BURN_TTL_SEC] — never shorter
+    # than the normal cooldown, never longer than the burn memory itself.
+    if retry_after:
+        park = min(max(float(retry_after), float(LANE_COOLDOWN_SEC)), float(BURN_TTL_SEC))
+        for key, ln in list(POOL.lanes.items()):
+            if ln.addr == addr:
+                ln.parked_until = max(ln.parked_until, now + park)
+                log.info("lane %s parked for %ds (upstream Retry-After)",
+                         _display_addr(addr), int(park))
+                break
     w = QUOTA_STATE["_429_window"]
     w.append((now, addr))
     w[:] = [(t, a) for t, a in w if now - t <= QUOTA_WINDOW_SEC]
@@ -2040,10 +2089,22 @@ def _adapt_concurrency(conn_errors: int, completed: int) -> None:
 async def _recover_parked() -> None:
     """Re-probe parked (burned) lanes whose cooldown elapsed — quota windows
     reset, so a burned IP often becomes usable again. This is the recovery
-    loop that makes the pool self-healing instead of one-shot."""
+    loop that makes the pool self-healing instead of one-shot.
+
+    Each attempt here costs a REAL completion, and on a spent IP that completion
+    is spent on a 429 — so the schedule must follow the evidence rather than a
+    fixed cooldown. Measured 2026-10-23: upstream sends `Retry-After` ≈ seconds
+    until 00:00 UTC (~16800-18600), i.e. the daily reset. `_note_lane_429` now
+    parks such a lane for that whole window, and `parked_lanes()` already
+    excludes lanes whose `parked_until` is in the future, so a lane inside its
+    advertised reset is never re-probed. What is left for this loop is genuine
+    exponential backoff for lanes parked without a Retry-After (timeouts,
+    mangles), which is the case this comment used to describe.
+    """
     now = time.time()
     due = [ln for ln in POOL.parked_lanes()
            if ln.url() is not None
+           and ln.parked_until <= now
            and now - ln.last_probe > LANE_RECOVER_SEC * min(2 ** ln.probe_tries, 16)]
     if not due:
         return
@@ -2063,7 +2124,7 @@ async def _recover_parked() -> None:
                     )
                     ln.last_probe = now
                     if r.status_code == 429 and is_quota_429(r.content, 429):
-                        _note_lane_429(ln.addr)
+                        _note_lane_429(ln.addr, _retry_after_sec(dict(r.headers)))
                         # Tor lane: rotate the circuit instead of re-parking a
                         # spent exit. Public lane: _note_lane_429 blocklisted the
                         # IP, and _drop_dead will retire the lane.
@@ -2760,7 +2821,7 @@ async def relay(payload: dict, path: str, stream: bool, headers: dict, timeout: 
                 return status, resp_headers, body
             if status == 429 and is_quota_429(body, 429):
                 lane.mark_fail(burn=True)
-                _note_lane_429(lane.addr)
+                _note_lane_429(lane.addr, _retry_after_sec(resp_headers))
                 if lane.addr.startswith(TOR_LANE_PREFIX):
                     tor_rotate_lane(lane)
                 elif lane.addr == WARP_PROXY_ADDR:
@@ -3083,7 +3144,7 @@ async def relay_stream(payload: dict, path: str, headers: dict, timeout: float):
                 continue
             if status == 429 and is_quota_429(await resp.aread(), 429):
                 lane.mark_fail(burn=True)
-                _note_lane_429(lane.addr)
+                _note_lane_429(lane.addr, _retry_after_sec(dict(resp.headers)))
                 if lane.addr.startswith(TOR_LANE_PREFIX):
                     tor_rotate_lane(lane)
                 elif lane.addr == WARP_PROXY_ADDR:
