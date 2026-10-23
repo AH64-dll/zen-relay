@@ -1,0 +1,5 @@
+# REST relay runtime (Python 3.12+; tested on 3.14)
+fastapi>=0.119
+uvicorn[standard]>=0.38
+httpx[socks]>=0.28.1
+python-dotenv>=1.0

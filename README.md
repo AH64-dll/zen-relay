@@ -15,6 +15,7 @@ Harness وتنشره على نفق HTTPS.
 |---|---|
 | `zen-router/rust/` | مصدر Rust الكامل للمرحّل |
 | `zen-router/bin/zen-relay` | ملف تنفيذي جاهز لـLinux x86_64 |
+| `zen-router/rest/` | مرحّل بايثون REST كامل (بديل للرست) — انظر `rest/README.md` |
 | `run.sh` | تشغيل بأمر واحد (تنفيذي جاهز أو بناء من المصدر) |
 | `install.sh` | تثبيت الحزمة كاملة: مرحّل + نفق + Harness |
 | `stack/` | مشرف `dsh-stack` + plugin استئناف الجلسات `session-keeper` |
