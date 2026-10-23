@@ -7,6 +7,13 @@ zen-router/*.tmp
 zen-router/*.log
 config/settings.json
 
+# Stray runtime copies written when the relay is started from the repo root
+# (they carry the relay key and the Webshare token, exactly like the above).
+/settings.json
+/lanes.json
+/burned.json
+/settings.json.bak-*
+
 # Stack runtime
 stack/node_modules/
 stack/stack.log

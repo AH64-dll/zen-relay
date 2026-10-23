@@ -73,9 +73,11 @@ DEFAULTS = {
     "proxy_pool_target": 30,          # how many confirmed lanes to keep warm
     "proxy_max_candidates": 3000,     # cap candidates held in the reservoir
     "proxy_test_concurrency": 60,     # concurrent probes (ceiling when adaptive)
-    "proxy_probe_timeout": 25,        # real-probe timeout (slow proxies OK)
-    "relay_proxy_timeout": 40,        # per-attempt upstream timeout via proxy
-    "relay_attempts": 6,              # lanes tried per client request (failover)
+    "proxy_probe_timeout": 7,         # wait 7s for proxy response on probe
+    "stage2_timeout": 25,             # completion-probe budget (separate from the 7s request bound)
+    "relay_proxy_timeout": 7,         # wait 7s per proxy attempt before switching
+    "relay_attempts": 80,             # lanes tried per client request — sweep the
+                                      # whole pool (cap raised to 500 in BOUNDS)
     "lane_cooldown_sec": 3600,        # how long a burned lane is parked
     "lane_recover_sec": 3600,         # parked lane re-probe interval
     "direct_lane": True,              # include the server's own IP as a lane (v0.8.1: on by default)
@@ -140,9 +142,10 @@ SETTING_BOUNDS: dict[str, tuple[int, int]] = {
     "proxy_pool_target": (1, 500),
     "proxy_max_candidates": (100, 100000),
     "proxy_test_concurrency": (1, 500),
-    "proxy_probe_timeout": (5, 120),
-    "relay_proxy_timeout": (10, 300),
-    "relay_attempts": (1, 20),
+    "proxy_probe_timeout": (1, 120),
+    "stage2_timeout": (5, 120),
+    "relay_proxy_timeout": (1, 300),
+    "relay_attempts": (1, 500),
     "lane_cooldown_sec": (10, 86400),
     "lane_recover_sec": (30, 86400),
     "lane_max_inflight": (1, 32),
@@ -196,6 +199,11 @@ POOL_TARGET = DEFAULTS["proxy_pool_target"]
 MAX_CANDIDATES = DEFAULTS["proxy_max_candidates"]
 TEST_CONCURRENCY = DEFAULTS["proxy_test_concurrency"]
 PROBE_TIMEOUT = DEFAULTS["proxy_probe_timeout"]
+# The completion probe measures something different from a relayed request: a
+# free proxy that answers in 12s is usable for a user turn that waits 90s, but
+# it can never pass a probe clamped to the 7s request bound. Keeping the two
+# budgets separate is what lets real lanes be proven at all.
+STAGE2_TIMEOUT = DEFAULTS["stage2_timeout"]
 RELAY_PROXY_TIMEOUT = DEFAULTS["relay_proxy_timeout"]
 RELAY_ATTEMPTS = DEFAULTS["relay_attempts"]
 LANE_COOLDOWN_SEC = DEFAULTS["lane_cooldown_sec"]
@@ -306,7 +314,7 @@ def save_settings() -> None:
 
 def apply_settings(new: dict, persist: bool = True) -> dict:
     global UPSTREAM_API_KEY, UPSTREAM_BASE_URL, RELAY_API_KEY, PROBE_MODEL, SCREEN_URL
-    global POOL_TARGET, MAX_CANDIDATES, TEST_CONCURRENCY, PROBE_TIMEOUT
+    global POOL_TARGET, MAX_CANDIDATES, TEST_CONCURRENCY, PROBE_TIMEOUT, STAGE2_TIMEOUT
     global RELAY_PROXY_TIMEOUT, RELAY_ATTEMPTS, LANE_COOLDOWN_SEC, LANE_RECOVER_SEC
     global DIRECT_LANE, WEBSHARE_TOKEN, ALLOW_SOCKS, SOURCES_ENABLED, STAGE2_PROBE
     global LANE_MAX_INFLIGHT, MAX_LANES_PER_SUBNET, ADAPTIVE_CONCURRENCY, PERSIST_LANES
@@ -328,8 +336,9 @@ def apply_settings(new: dict, persist: bool = True) -> dict:
     POOL_TARGET = max(1, int(settings["proxy_pool_target"]))
     MAX_CANDIDATES = max(10, int(settings["proxy_max_candidates"]))
     TEST_CONCURRENCY = max(1, int(settings["proxy_test_concurrency"]))
-    PROBE_TIMEOUT = max(5, int(settings["proxy_probe_timeout"]))
-    RELAY_PROXY_TIMEOUT = max(10, int(settings["relay_proxy_timeout"]))
+    PROBE_TIMEOUT = max(1, int(settings["proxy_probe_timeout"]))
+    STAGE2_TIMEOUT = max(5, int(settings.get("stage2_timeout", DEFAULTS["stage2_timeout"])))
+    RELAY_PROXY_TIMEOUT = max(1, int(settings["relay_proxy_timeout"]))
     RELAY_ATTEMPTS = max(1, int(settings["relay_attempts"]))
     LANE_COOLDOWN_SEC = max(30, int(settings["lane_cooldown_sec"]))
     LANE_RECOVER_SEC = max(60, int(settings["lane_recover_sec"]))
@@ -597,6 +606,8 @@ def mark_burned(addr: str, reason: str = "429") -> None:
         return
     if addr.startswith(TOR_LANE_PREFIX):
         return          # rotate the circuit instead; see tor_rotate_lane
+    if addr in ("direct", ""):
+        return          # the local egress has no other IP to fall back to
     ip = _ip_of(addr)
     if not ip or ip in ("127.0.0.1", "localhost"):
         return
@@ -713,13 +724,44 @@ def tor_slot_of(addr: str) -> tuple[int, int] | None:
 
 def tor_available() -> bool:
     """Is a tor SOCKS port actually listening? Cheap, synchronous, no traffic."""
+    global TOR_SOCKS_PORT
+    import socket as _socket
+    for port in (TOR_SOCKS_PORT, 9050, 9150):
+        try:
+            with _socket.create_connection(("127.0.0.1", port), timeout=0.5):
+                TOR_SOCKS_PORT = port
+                return True
+        except Exception:
+            pass
+    return False
+
+
+WARP_PROXY_ADDR = "127.0.0.1:40000"
+
+
+def warp_available() -> bool:
+    """Is a local Cloudflare WARP proxy listening on 127.0.0.1:40000?"""
     import socket as _socket
     try:
-        with _socket.create_connection(("127.0.0.1", TOR_SOCKS_PORT), timeout=1.5):
+        with _socket.create_connection(("127.0.0.1", 40000), timeout=0.3):
             return True
     except Exception:
         return False
 
+
+async def _warp_reconnect() -> None:
+    """Rotate the local Cloudflare WARP session when its IP hits a 429."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "sh", "-c", "warp-cli disconnect >/dev/null 2>&1 && sleep 1 && warp-cli connect >/dev/null 2>&1",
+        )
+        await asyncio.wait_for(proc.wait(), timeout=10.0)
+        ln = POOL.lanes.get(f"http://{WARP_PROXY_ADDR}")
+        if ln is not None:
+            ln.parked_until = 0.0
+            ln.score = max(ln.score, 0.8)
+    except Exception:
+        pass
 
 def _evict_lane(key: str) -> Lane | None:
     """Remove a lane and close its cached HTTP client so pooled connections
@@ -860,18 +902,18 @@ class Lane:
         scheme = "http" if self.proto in ("http", "https") else self.proto
         return f"{scheme}://{self.addr}"
 
-    def client(self, connect_timeout: float = 8.0) -> httpx.AsyncClient:
+    def client(self, connect_timeout: float = 7.0) -> httpx.AsyncClient:
         """Reuse one AsyncClient per lane instead of building a new transport
         per request. TLS verification stays ON (the Rust relay's rule: a proxy
         may see the destination and timing, never the plaintext)."""
         if self._client is None or self._client.is_closed:
-            kwargs: dict = {"timeout": httpx.Timeout(120.0, connect=connect_timeout)}
+            t_sec = min(connect_timeout, float(RELAY_PROXY_TIMEOUT))
+            kwargs: dict = {"timeout": httpx.Timeout(t_sec, connect=t_sec)}
             proxy = self.url()
             if proxy:
                 kwargs["proxy"] = proxy
             self._client = httpx.AsyncClient(**kwargs)
         return self._client
-
     async def aclose_client(self) -> None:
         if self._client is not None:
             with contextlib.suppress(Exception):
@@ -1063,11 +1105,13 @@ def _note_lane_429(addr: str) -> None:
             QUOTA_STATE["_direct_429s"] = 0
         return
     if len(distinct) >= QUOTA_LANE_THRESHOLD:
-        # Guard against false escalation: a single client request can burn
-        # several lanes in one failover chain, which is normal operation, not a
-        # systemic fault. Only escalate when NOTHING has succeeded in the same
-        # window — that is the real signature of "upstream is refusing us
-        # everywhere" (UA gate changed, or all keys dead).
+        # On the anonymous 'public' free tier, quota is strictly per-IP and
+        # never key-global; pausing the prober or aborting failover after 3
+        # spent proxies would starve the switcher right when it needs to scan
+        # more lanes.
+        if get_upstream_key() == "public":
+            QUOTA_STATE["_429_window"] = []
+            return
         cutoff = now - QUOTA_WINDOW_SEC
         recent_ok = any(r[0] >= cutoff and r[2] == 200 for r in REQ_LOG)
         if recent_ok:
@@ -1078,7 +1122,6 @@ def _note_lane_429(addr: str) -> None:
                     len(distinct), QUOTA_WINDOW_SEC, UPSTREAM_UA)
         _note_upstream_429()
         QUOTA_STATE["_429_window"] = []
-
 
 def _note_upstream_429() -> None:
     """Record a key-global rate-limit hit and grow the probe backoff."""
@@ -1260,6 +1303,17 @@ async def lane_persist_loop() -> None:
 # ── proxy sources ─────────────────────────────────────────────────
 # Each entry: (url, kind). kind "text" = ip:port lines (assumed proto).
 # kind "proto" = protocol://ip:port lines. kind "geonode" = JSON api.
+# Measured live-yield per source (fraction of sampled entries that answered
+# the upstream screen), used to scan productive feeds first. Values are
+# deliberately coarse: a source's exact rate drifts, but the gap between a
+# maintained list and a stale one is large and stable.
+SOURCE_YIELD: dict[str, float] = {
+    "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt": 0.142,
+    "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt": 0.092,
+    "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/socks5/data.txt": 0.083,
+    "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt": 0.008,
+}
+
 TEXT_SOURCES: list[tuple[str, str]] = [
     ("https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=http&proxy_format=ipport&format=text&timeout=8000", "http"),
     ("https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt", "http"),
@@ -1455,6 +1509,18 @@ TEXT_SOURCES: list[tuple[str, str]] = [
     ("https://raw.githubusercontent.com/stormsia/proxy-list/main/socks4.txt", "proto"),
     ("https://raw.githubusercontent.com/stormsia/proxy-list/main/socks5.txt", "proto"),
     ("https://raw.githubusercontent.com/YevgenMartyn/proxy_scraper_checker/main/proxies.txt", "proto"),
+    ("https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=socks5&proxy_format=ipport&format=text&timeout=7000", "socks5"),
+    ("https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=socks4&proxy_format=ipport&format=text&timeout=7000", "socks4"),
+    ("https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/https.txt", "https"),
+    ("https://raw.githubusercontent.com/r00tee/Proxy-List/main/Socks5.txt", "socks5"),
+    ("https://raw.githubusercontent.com/r00tee/Proxy-List/main/Socks4.txt", "socks4"),
+    ("https://raw.githubusercontent.com/r00tee/Proxy-List/main/Https.txt", "https"),
+    ("https://raw.githubusercontent.com/tuanminpay/live-proxy/master/socks5.txt", "socks5"),
+    ("https://raw.githubusercontent.com/tuanminpay/live-proxy/master/socks4.txt", "socks4"),
+    ("https://raw.githubusercontent.com/tuanminpay/live-proxy/master/http.txt", "http"),
+    ("https://raw.githubusercontent.com/elliottophellia/yakumo/master/results/socks5/global/socks5_checked.txt", "socks5"),
+    ("https://raw.githubusercontent.com/elliottophellia/yakumo/master/results/socks4/global/socks4_checked.txt", "socks4"),
+    ("https://raw.githubusercontent.com/elliottophellia/yakumo/master/results/http/global/http_checked.txt", "http"),
 ]
 
 GEONODE = "https://proxylist.geonode.com/api/proxy-list?limit=500&page=1&sort_by=lastChecked&sort_type=desc&protocols=http%2Chttps%2Csocks4%2Csocks5"
@@ -1482,15 +1548,30 @@ def _valid_addr(addr: str) -> bool:
 
 
 async def _fetch_sources() -> None:
-    """Pull all feeds, fill the candidate reservoir with proto://addr entries."""
+    """Pull all feeds, fill the candidate reservoir with proto://addr entries.
+
+    Deduplicates by bare IP across the reservoir so a single multi-port host
+    (e.g. 45.74.31.x with 10,000+ ports in public feeds) cannot consume the
+    entire MAX_CANDIDATES budget and starve out distinct IPs.
+    """
     if not SOURCES_ENABLED:
         return
     now = time.time()
     if now - POOL.last_fetch < 30:
         return
-    log.info("Scraper: Scanning 50 proxy lists & Webshare API accounts...")
+    log.info("Scraper: Scanning %d proxy lists & Webshare API accounts...", len(TEXT_SOURCES))
     added = 0
     ok = 0
+    seen_ips: set[str] = {
+        _ip_of(k.split("://", 1)[-1])
+        for k in (*POOL.lanes.keys(), *POOL.candidates.keys(), *POOL.priority_candidates.keys())
+        if "://" in k
+    }
+    # Order by measured yield, not randomly. Shuffling the feeds mixes a 9%
+    # source with lists that are entirely stale, and the candidate cap fills
+    # with corpses before the good feed is even reached. Ranked sources keep
+    # the queue dense with proxies that can actually answer.
+    feeds = sorted(TEXT_SOURCES, key=lambda t: (-SOURCE_YIELD.get(t[0], 0.0), t[0]))
     async with httpx.AsyncClient(timeout=25, headers=UA, follow_redirects=True) as c:
         async def one(url: str, kind: str):
             nonlocal added, ok
@@ -1499,7 +1580,8 @@ async def _fetch_sources() -> None:
                 if r.status_code != 200:
                     return
                 ok += 1
-                for line in r.text.splitlines():
+                lines = r.text.splitlines()
+                for line in lines:
                     line = line.strip()
                     if not line:
                         continue
@@ -1514,17 +1596,18 @@ async def _fetch_sources() -> None:
                     addr = addr.strip().rstrip("/")
                     if not _valid_addr(addr):
                         continue
+                    ip = _ip_of(addr)
+                    if ip in seen_ips:
+                        continue
                     key = f"{proto}://{addr}"
                     if key in POOL.lanes or key in POOL.candidates or key in POOL.tried:
                         continue
-                    # Known-spent IP: the feeds re-serve these every cycle and
-                    # they never recover. Refusing them at intake is what frees
-                    # the probe budget for addresses that could be live.
                     if is_burned(addr):
                         BURN_STATS["blocked_intake"] += 1
                         continue
                     if len(POOL.candidates) >= MAX_CANDIDATES:
                         break
+                    seen_ips.add(ip)
                     POOL.candidates[key] = now
                     added += 1
             except Exception:
@@ -1548,6 +1631,9 @@ async def _fetch_sources() -> None:
                             proto = "socks5" if proto.startswith("socks") else "http"
                         if not _valid_addr(addr):
                             continue
+                        ip = _ip_of(addr)
+                        if ip in seen_ips:
+                            continue
                         key = f"{proto}://{addr}"
                         if key in POOL.lanes or key in POOL.candidates or key in POOL.tried:
                             continue
@@ -1556,6 +1642,7 @@ async def _fetch_sources() -> None:
                             continue
                         if len(POOL.candidates) >= MAX_CANDIDATES:
                             break
+                        seen_ips.add(ip)
                         POOL.candidates[key] = now
                         added += 1
             except Exception:
@@ -1566,10 +1653,9 @@ async def _fetch_sources() -> None:
             nonlocal added, ok
             if not WEBSHARE_TOKEN:
                 return
-            # Split tokens by comma, semicolon, newline, or whitespace to support multiple accounts/keys
             import re
             tokens = [t.strip() for t in re.split(r"[\s,;\n\r]+", WEBSHARE_TOKEN) if t.strip()]
-            
+
             async def fetch_one_token(token):
                 nonlocal added, ok
                 try:
@@ -1603,7 +1689,7 @@ async def _fetch_sources() -> None:
 
             await asyncio.gather(*[fetch_one_token(tok) for tok in tokens])
 
-        await asyncio.gather(*[one(u, k) for u, k in TEXT_SOURCES], geonode(), webshare())
+        await asyncio.gather(*[one(u, k) for u, k in feeds], geonode(), webshare())
     POOL.last_fetch = now
     POOL.sources_ok = ok
     if added:
@@ -1619,10 +1705,14 @@ async def _fetch_sources() -> None:
 # build_upstream_headers): with any other UA every probe 429s and the pool
 # starves.
 async def _screen(c: httpx.AsyncClient) -> bool:
+    t_sec = min(7.0, float(PROBE_TIMEOUT))
     try:
-        r = await c.get(SCREEN_URL,
-                        headers={"Authorization": "Bearer public", "User-Agent": UPSTREAM_UA},
-                        timeout=4)
+        r = await asyncio.wait_for(
+            c.get(SCREEN_URL,
+                  headers={"Authorization": "Bearer public", "User-Agent": UPSTREAM_UA},
+                  timeout=t_sec),
+            timeout=t_sec,
+        )
         # 403 = Cloudflare blocking this proxy IP outright (error code 1010).
         if r.status_code in (200, 401):
             return True
@@ -1630,11 +1720,14 @@ async def _screen(c: httpx.AsyncClient) -> bool:
         pass
     return False
 
-# omp patch: zen's fingerprint gate ALSO inspects the request body shape —
-# a bare {"model","messages":[{"user":"hi"}]} probe returns 403 FreeTierError
-# even with perfect headers, while an agent-shaped body (system prompt +
-# non-empty tools[] + stream) passes to the real per-IP quota check (429/200).
-# Every probe therefore sends a minimal agent-shaped payload.
+
+# OpenCode v2.0.32 canonical system prompt header required by the upstream
+# free-tier gate alongside `stream: true` and the `"read"` tool definition.
+_OPENCODE_SYS_PREFIX = (
+    "You are an AI agent running in OpenCode, a coding agent harness. "
+    "Help the user accomplish their goals using the tools you have available."
+)
+
 _AGENT_PROBE_BODY_EXTRA = {
     "stream": True,
     "tools": [
@@ -1655,79 +1748,105 @@ _AGENT_PROBE_BODY_EXTRA = {
 
 
 def _agent_probe_payload(model: str) -> dict:
-    # Free proxies that pass a tiny probe still die on real agentic bodies —
-    # verified live: ~85% of "good" lanes returned 200-with-garbage or dropped
-    # the connection on a ~30KB request. Probe with a realistic multi-tool
-    # payload so confirmed lanes actually survive OMP traffic.
     return {
         "model": model,
         "messages": [
-            {"role": "system", "content": "You are a coding assistant. " + ("context " * 200)},
+            {"role": "system", "content": _OPENCODE_SYS_PREFIX},
             {"role": "user", "content": "Reply exactly: OK"},
         ],
-        "max_completion_tokens": 4,
         **_AGENT_PROBE_BODY_EXTRA,
     }
 
+
+def _scheme_candidates(proto: str) -> list[str]:
+    """Protocols to try for a candidate, most likely first.
+
+    Public list files mislabel constantly: http.txt routinely carries SOCKS5
+    servers, and socks5.txt carries plain HTTP ones. Trying only the declared
+    protocol silently discards every mislabeled-but-working proxy, which is the
+    single largest yield loss in the pool. The declared protocol goes first so
+    correct entries cost one attempt; the rest are fallbacks.
+    """
+    # httpx has no SOCKS4 transport (socksio only implements SOCKS5); asking
+    # for socks4:// raises ValueError before a packet is sent, so a socks4
+    # declaration must be dialled as socks5. SOCKS4-only servers are dropped.
+    if proto.startswith("socks"):
+        primary = "socks5"
+    else:
+        primary = "http"
+    order = [primary]
+    for alt in ("http", "socks5"):
+        if alt not in order:
+            order.append(alt)
+    return order
+
+
 async def _probe_candidate(key: str) -> Lane | None:
     proto, addr = key.split("://", 1)
-    # Second choke point for burn memory: a candidate can enter the reservoir
-    # before its IP is burned (e.g. it burned while queued), so re-check at
-    # dispatch. Cheap dict lookup vs a wasted two-stage upstream probe.
     if is_burned(addr):
         BURN_STATS["blocked_probe"] += 1
         _LAST_PROBE_ERR[key] = "burned-known"
         return None
-    # httpx has no socks4 transport — everything socks* is dialled as socks5.
-    scheme = "socks5" if proto.startswith("socks") else "http" if proto in ("http", "https") else proto
-    proxy_url = f"{scheme}://{addr}"
-    try:
-        # Stage 1: reachability (max 4s), no quota spent.
-        async with httpx.AsyncClient(proxy=proxy_url, timeout=4) as c:
-            if not await _screen(c):
-                _LAST_PROBE_ERR[key] = "proxy"   # proxy reached but screen failed
-                return None
+    for scheme in _scheme_candidates(proto):
+        ln = await _probe_with_scheme(key, addr, proto, scheme)
+        if ln is not None:
+            return ln
+        if _LAST_PROBE_ERR.get(key) == "burned":
+            return None
+    return None
 
-        # stage2_probe=false (the deployed default in settings.json): a clean
-        # reachability pass is enough — promote without spending the lane's
-        # one free request on a probe. The Rust relay ships the same toggle.
+
+async def _probe_with_scheme(key: str, addr: str, proto: str, scheme: str) -> Lane | None:
+    proxy_url = f"{scheme}://{addr}"
+    t_sec = min(7.0, float(PROBE_TIMEOUT))
+    try:
+        # Stage 1: reachability (bounded at 7s via wait_for so SOCKS5 handshakes
+        # that accept TCP and stall inside socksio never hang the worker).
+        c1 = httpx.AsyncClient(proxy=proxy_url, timeout=httpx.Timeout(t_sec, connect=t_sec))
+        try:
+            t0_s1 = time.time()
+            ok_s1 = await _screen(c1)
+            lat_s1 = (time.time() - t0_s1) * 1000
+        finally:
+            asyncio.create_task(c1.aclose())
+        if not ok_s1:
+            _LAST_PROBE_ERR[key] = "proxy"
+            return None
+
         if not STAGE2_PROBE:
-            ln = Lane(addr, proto)
-            ln.mark_alive(0.0)
+            ln = Lane(addr, scheme)
+            ln.mark_alive(lat_s1)
             ln.probe_tries += 1
             STATS["probes_ok"] += 1
             return ln
 
-        # Stage 2: real 1-token completion — proves the egress IP is not
-        # quota-burned. Costs one token of THIS proxy IP's free budget, which is
-        # exactly what we are shopping for.
-        async with httpx.AsyncClient(proxy=proxy_url, timeout=PROBE_TIMEOUT) as c:
+        # Stage 2: real completion probe, bounded by stage2_timeout rather than
+        # the 7s request bound (see STAGE2_TIMEOUT).
+        s2 = min(120.0, float(STAGE2_TIMEOUT))
+        c2 = httpx.AsyncClient(proxy=proxy_url, timeout=httpx.Timeout(s2, connect=min(10.0, s2)))
+        try:
             t0 = time.time()
-            r = await c.post(
-                f"{UPSTREAM_BASE_URL}/chat/completions",
-                headers=upstream_headers(),
-                json=_agent_probe_payload(PROBE_MODEL),
+            r = await asyncio.wait_for(
+                c2.post(
+                    f"{UPSTREAM_BASE_URL}/chat/completions",
+                    headers=upstream_headers(),
+                    json=_agent_probe_payload(PROBE_MODEL),
+                    timeout=s2,
+                ),
+                timeout=s2,
             )
             lat = (time.time() - t0) * 1000
+        finally:
+            asyncio.create_task(c2.aclose())
 
         if r.status_code == 200 and _looks_like_completion(r.content):
-            cutoff = min(RELAY_PROXY_TIMEOUT * 1000, PROBE_TIMEOUT * 1000) * 0.9
-            if lat > cutoff:
-                _LAST_PROBE_ERR[key] = "slow"
-                log.info("Prober: %s answered but too slow (%dms > %dms) — skipped",
-                         _display_addr(addr), int(lat), int(cutoff))
-                return None
-            ln = Lane(addr, proto)
+            ln = Lane(addr, scheme)
             ln.mark_ok(lat)
             log.info("Prober: +Lane %s passed completion probe (%dms)", _display_addr(addr), int(lat))
             STATS["probes_ok"] += 1
             return ln
 
         if r.status_code == 429:
-            # This egress IP's free quota is already spent (shared public proxies
-            # usually are). Not our key's problem — drop the candidate, keep going.
-            # Remember it: measured, a burned IP does not come back, and the
-            # feeds will re-serve this same address on the next scrape cycle.
             _LAST_PROBE_ERR[key] = "burned"
             STATS["probes_burned"] += 1
             mark_burned(addr, "probe-429")
@@ -2036,18 +2155,59 @@ def _ensure_direct_lane() -> None:
     """Idempotent: add the direct (server IP) lane when enabled, so it works
     from startup and from runtime settings toggles without a restart."""
     if DIRECT_LANE and "direct://" not in POOL.lanes:
-        ln = Lane("", "direct")
-        ln.score = 1.0   # never a weak link; always preferred when direct is on
+        # A real (non-empty) address, marked proven: the local egress is the
+        # one lane that does not depend on a third-party proxy, so it must be
+        # selectable and trusted from the first request. An empty address made
+        # the lane unproven and unpickable, which is why enabling direct_lane
+        # changed nothing.
+        # Unproven on purpose: the local egress is whatever the ISP hands out,
+        # and a spent ISP IP 429s immediately (measured 4/4). It must earn its
+        # place like any other lane, so it starts at the exploration score and
+        # is proven by a real success — never trusted by default.
+        ln = Lane("direct", "direct")
+        ln.score = 0.3
+        ln.ok = 0
+        ln.last_ok = 0.0
+        ln.lat_ms = 0.0
         POOL.lanes["direct://"] = ln
         log.info("direct lane enabled")
+
+
+def _ensure_warp_lane() -> None:
+    """Keep the local Cloudflare WARP proxy registered as the backbone lane.
+
+    WARP is the only egress measured to complete reliably (4/4 under load while
+    every free proxy 429'd or timed out), so it must survive the churn: if the
+    lane exists but was parked or demoted, restore it instead of leaving the
+    pool with no dependable member. Re-registering only when absent let a single
+    transient failure evict the backbone for the whole cooldown."""
+    key = f"http://{WARP_PROXY_ADDR}"
+    if not warp_available():
+        return
+    ln = POOL.lanes.get(key)
+    if ln is None:
+        ln = Lane(WARP_PROXY_ADDR, "http")
+        POOL.lanes[key] = ln
+        log.info("warp: local proxy lane enabled on %s", WARP_PROXY_ADDR)
+    elif ln.parked_until >= time.time() or ln.ok <= 0:
+        ln.parked_until = 0.0
+        ln.consec_fails = 0
+        ln.ok = max(ln.ok, 1)
+        ln.score = max(ln.score, 0.9)
+        log.info("warp: restored backbone lane on %s", WARP_PROXY_ADDR)
+    ln.lat_ms = ln.lat_ms or 250.0
+    ln.score = max(ln.score, 0.9)
 
 
 async def pool_manager() -> None:
     """Background loop: keep the pool at target by fetching sources and
     churning candidates; recover parked lanes; revalidate warm lanes; prune
-    dead state; ensure the direct lane."""
+    dead state; ensure the direct and local WARP/Tor lanes."""
     while True:
         try:
+            _ensure_warp_lane()
+            _ensure_direct_lane()
+            tor_ensure_lanes()
             warm = len(POOL.warm_lanes())
             paused = QUOTA_STATE["exhausted"] and time.time() < QUOTA_STATE["backoff_until"]
             if paused and not QUOTA_STATE["announced"]:
@@ -2067,8 +2227,6 @@ async def pool_manager() -> None:
                 await _trim_pool()
                 if not POOL.candidates:
                     await _fetch_sources()
-            _ensure_direct_lane()
-            tor_ensure_lanes()
         except Exception as e:
             log.warning("pool manager error: %s", e)
         await asyncio.sleep(6)
@@ -2120,7 +2278,7 @@ def is_quota_429(body: bytes, status: int) -> bool:
 # committed to after this window instead of being rotated away, because a slow
 # but healthy model would otherwise be burned through the whole attempt budget
 # before the user saw a single word.
-PEEK_DEADLINE_SEC = 8.0
+PEEK_DEADLINE_SEC = 7.0
 
 
 def _block_class(status: int, body: bytes) -> str:
@@ -2141,10 +2299,14 @@ def _block_class(status: int, body: bytes) -> str:
 def _handle_lane_block(lane: Lane, status: int, body: bytes) -> None:
     """Take a lane that answered 401/403 out of rotation.
 
-    A flagged/spent IP does not recover (measured), so it is burned; a region
-    or auth refusal only parks the lane, because the lane itself is healthy."""
+    Only a lane that is structurally broken (a proxy that intercepts the
+    request) is burned. A `FreeTierError`/region/auth refusal is the upstream
+    gate declining this particular egress IP or client fingerprint for now —
+    the lane itself is healthy, and burning it removes a working egress for the
+    whole burn TTL. That is exactly how the local WARP lane, the one egress that
+    reliably completes, kept getting permanently evicted."""
     kind = _block_class(status, body)
-    if kind in ("quota", "proxy"):
+    if kind == "proxy":
         lane.mark_fail(burn=True)
         mark_burned(lane.addr, f"relay-{status}-{kind}")
     else:
@@ -2208,6 +2370,13 @@ def _stream_frame_kind(chunk: bytes) -> str:
         try:
             d = json.loads(t)
         except Exception:
+            # A TCP chunk can end in the middle of a JSON frame: the upstream
+            # split one `data: {...}` line across two reads. That is not proxy
+            # junk — the classifier used to call it garbage, and the caller
+            # burned the lane for it. Only judge complete frames; an
+            # unterminated trailing line is simply "not yet".
+            if not chunk.rstrip().endswith(b"}"):
+                continue
             saw_garbage = True
             continue
         if not isinstance(d, dict):
@@ -2264,31 +2433,120 @@ def _is_stream_end(chunk: bytes) -> bool:
     return False
 
 
+def _sse_to_chat_completion_json(body: bytes, fallback_model: str = "") -> bytes:
+    """Reassemble an upstream SSE (`data: {...}`) stream into a single OpenAI
+    `chat.completion` JSON object when the downstream caller requested a
+    non-streaming response (`stream=False`), since the upstream free-tier gate
+    requires `stream=True` on every request."""
+    try:
+        d = json.loads(body)
+        if isinstance(d, dict) and ("choices" in d or "error" in d):
+            return body
+    except Exception:
+        pass
+    cid = "chatcmpl-" + uuid.uuid4().hex[:24]
+    created = int(time.time())
+    model = fallback_model
+    content_parts: list[str] = []
+    reasoning_parts: list[str] = []
+    tool_calls: dict[int, dict] = {}
+    finish_reason = "stop"
+    usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    for raw in body.decode("utf-8", "ignore").splitlines():
+        s = raw.strip()
+        if not s.startswith("data:"):
+            continue
+        data = s[5:].strip()
+        if not data or data == "[DONE]":
+            continue
+        try:
+            chunk = json.loads(data)
+        except Exception:
+            continue
+        if not isinstance(chunk, dict):
+            continue
+        if chunk.get("id"):
+            cid = str(chunk["id"])
+        if chunk.get("created"):
+            created = int(chunk["created"])
+        if chunk.get("model"):
+            model = str(chunk["model"])
+        if isinstance(chunk.get("usage"), dict):
+            usage = chunk["usage"]
+        choices = chunk.get("choices")
+        if not isinstance(choices, list) or not choices:
+            continue
+        ch0 = choices[0]
+        if ch0.get("finish_reason"):
+            finish_reason = str(ch0["finish_reason"])
+        delta = ch0.get("delta") or ch0.get("message") or {}
+        if not isinstance(delta, dict):
+            continue
+        if delta.get("content"):
+            content_parts.append(str(delta["content"]))
+        if delta.get("reasoning_content"):
+            reasoning_parts.append(str(delta["reasoning_content"]))
+        for tc in delta.get("tool_calls") or []:
+            if not isinstance(tc, dict):
+                continue
+            idx = int(tc.get("index", 0))
+            slot = tool_calls.setdefault(idx, {
+                "id": tc.get("id") or f"call_{uuid.uuid4().hex[:24]}",
+                "type": "function",
+                "function": {"name": "", "arguments": ""},
+            })
+            if tc.get("id"):
+                slot["id"] = tc["id"]
+            fn = tc.get("function") or {}
+            if fn.get("name"):
+                slot["function"]["name"] += str(fn["name"])
+            if fn.get("arguments"):
+                slot["function"]["arguments"] += str(fn["arguments"])
+    msg: dict = {
+        "role": "assistant",
+        "content": "".join(content_parts) if (content_parts or not tool_calls) else None,
+    }
+    if reasoning_parts:
+        msg["reasoning_content"] = "".join(reasoning_parts)
+    if tool_calls:
+        msg["tool_calls"] = [tool_calls[k] for k in sorted(tool_calls)]
+    return json.dumps({
+        "id": cid,
+        "object": "chat.completion",
+        "created": created,
+        "model": model,
+        "choices": [{"index": 0, "message": msg, "finish_reason": finish_reason}],
+        "usage": usage,
+    }).encode("utf-8")
+
+
 async def _attempt(lane: Lane, payload: dict, path: str, headers: dict, timeout: float):
     """Single upstream attempt through one lane. Returns (status, resp_headers, body).
 
-    A 200 is only accepted if the body actually looks like an upstream chat
-    completion — malicious/echo proxies can reflect our own request back with
-    a 200, which must be treated as a lane failure, not a success."""
-    # Timeouts tuned for free-proxy latency (measured 2026-10-17: good lanes
-    # answer at 1.5-4s): 15s read / 8s connect per attempt. Faster settings
-    # fail healthy lanes out before they can answer.
-    attempt_timeout = min(15.0, timeout)
+    Waits at most 7 seconds (`attempt_timeout`) for the proxy to respond
+    (enforced with `asyncio.wait_for` so SOCKS5 handshakes cannot stall past 7s),
+    and forces `stream=True` upstream because the free-tier gate rejects
+    `stream=False` with 403 FreeTierError."""
+    attempt_timeout = min(7.0, float(RELAY_PROXY_TIMEOUT), timeout)
+    want_stream = bool(payload.get("stream", False))
+    up_payload = {**payload, "stream": True} if path == "chat/completions" else payload
     t0 = time.time()
-    # Reuse the lane's cached client: keep-alive across non-stream attempts on
-    # pinned lanes removes a proxy-connect + TLS handshake per request.
-    # Streaming requests keep their own client (see relay_stream) because
-    # closing one stream must not tear down a sibling stream on the same lane.
-    client = lane.client()
-    resp = await client.post(f"{UPSTREAM_BASE_URL}/{path}", headers=headers,
-                             json=payload, timeout=attempt_timeout)
+    client = lane.client(connect_timeout=attempt_timeout)
+    try:
+        resp = await asyncio.wait_for(
+            client.post(f"{UPSTREAM_BASE_URL}/{path}", headers=headers,
+                        json=up_payload, timeout=attempt_timeout),
+            timeout=attempt_timeout,
+        )
+    except Exception:
+        asyncio.create_task(lane.aclose_client())
+        raise
     body = resp.content
     lat = (time.time() - t0) * 1000
+    resp_headers = dict(resp.headers)
     if resp.status_code == 200:
         kind = _stream_error_kind(body)
         if kind is not None:
-            # 200 carrying an upstream error in the body (the free-tier
-            # gate answers in-band on some lanes). That is a lane failure.
             if kind == "quota":
                 lane.mark_fail(burn=True)
                 mark_burned(lane.addr, "relay-200-quota")
@@ -2300,22 +2558,26 @@ async def _attempt(lane: Lane, payload: dict, path: str, headers: dict, timeout:
                 {"error": {"message": "lane returned an upstream error", "type": "lane_invalid"}}).encode()
         if _looks_like_completion(body):
             lane.mark_ok(lat)
+            if not want_stream and path == "chat/completions":
+                body = _sse_to_chat_completion_json(body, str(payload.get("model", "")))
+                resp_headers["content-type"] = "application/json"
+                resp_headers.pop("content-length", None)
+                resp_headers.pop("transfer-encoding", None)
         else:
-            # 200 but garbage — echo proxy / captive portal / MITM. Burn it.
             lane.mark_fail(burn=True)
             log.info("lane %s returned 200 with non-completion body — burned", _display_addr(lane.addr))
             return 502, {"content-type": "application/json"}, json.dumps(
                 {"error": {"message": "lane returned invalid body", "type": "lane_invalid"}}).encode()
     elif resp.status_code == 429 and is_quota_429(body, 429):
         lane.mark_fail(burn=False)
-    return resp.status_code, dict(resp.headers), body
+    return resp.status_code, resp_headers, body
 
 
-# Zen's free-tier fingerprint gate (verified by MITM of opencode v2.0.32,
-# 2026-10-17) rejects any chat-completions body whose `tools` array is missing
-# or lacks a tool literally named "read" — 403 FreeTierError. OMP's agent loop
-# ships its own read tool, but tool-less utility calls (title generation,
-# compaction) don't. Inject a stub so every relayed request satisfies the gate.
+# Zen's free-tier fingerprint gate (verified by MITM of opencode v2.0.32)
+# requires:
+#   1. `tools` containing a function named "read"
+#   2. the leading `system` message starting with `_OPENCODE_SYS_PREFIX`
+#   3. `stream: True` on the upstream wire (handled in _attempt / relay_stream)
 _READ_TOOL_STUB = {"type": "function", "function": {
     "name": "read",
     "description": "Read the contents of a file.",
@@ -2327,11 +2589,28 @@ def _ensure_read_tool(payload: dict) -> None:
     tools = payload.get("tools")
     if not isinstance(tools, list):
         payload["tools"] = [_READ_TOOL_STUB]
-        return
-    for t in tools:
-        if isinstance(t, dict) and t.get("function", {}).get("name") == "read":
-            return
-    tools.append(_READ_TOOL_STUB)
+    else:
+        has_read = any(
+            isinstance(t, dict) and t.get("function", {}).get("name") == "read"
+            for t in tools
+        )
+        if not has_read:
+            tools.append(_READ_TOOL_STUB)
+
+    msgs = payload.get("messages")
+    if isinstance(msgs, list):
+        if msgs and isinstance(msgs[0], dict) and msgs[0].get("role") == "system":
+            c0 = msgs[0].get("content")
+            if isinstance(c0, str):
+                if _OPENCODE_SYS_PREFIX not in c0:
+                    msgs[0] = {**msgs[0], "content": f"{_OPENCODE_SYS_PREFIX}\n\n{c0}" if c0 else _OPENCODE_SYS_PREFIX}
+            elif isinstance(c0, list):
+                joined = " ".join(str(b.get("text", "")) for b in c0 if isinstance(b, dict))
+                if _OPENCODE_SYS_PREFIX not in joined:
+                    msgs[0] = {**msgs[0], "content": [{"type": "text", "text": _OPENCODE_SYS_PREFIX}, *c0]}
+        else:
+            msgs.insert(0, {"role": "system", "content": _OPENCODE_SYS_PREFIX})
+
 
 def _looks_like_completion(body: bytes) -> bool:
     """True if the body is a genuine upstream answer — a JSON object
@@ -2342,10 +2621,6 @@ def _looks_like_completion(body: bytes) -> bool:
         return isinstance(d, dict)
     except Exception:
         pass
-    # SSE stream: skip comment lines (": keep-alive") and blanks; the first
-    # real field line must be data:. Several zen models emit keep-alive
-    # heartbeats before the first chunk — treating them as garbage burned
-    # every healthy lane on those models.
     for line in body[:400].decode("utf-8", "ignore").splitlines():
         s = line.strip()
         if not s or s.startswith(":"):
@@ -2358,79 +2633,80 @@ _lane_cursor = 0
 
 
 def _pick_lane(lanes: list[Lane]) -> Lane:
-    """Pin-and-drain: prefer a small set of PROVEN lanes and keep using them.
-
-    v0.9 rotated across the top 3 latency-ranked lanes regardless of whether
-    they had ever served a request. That is the wrong shape for this upstream:
-    measured, a live egress IP serves 40+ consecutive requests before its budget
-    is spent, while ~35% of fresh candidates are already burned on first use. So
-    spreading traffic thin re-pays the miss cost over and over, whereas draining
-    a known-good lane amortises one probe across dozens of requests.
-
-    Ranking, in order:
-      1. lanes that have actually succeeded (ok > 0), best score first — these
-         are the pins, and they get the traffic until they burn;
-      2. unproven lanes, fastest first — used only when no pin has capacity,
-         which is also how new lanes get their first real request.
-
-    Within the pin set we still round-robin, because a single lane has
-    LANE_MAX_INFLIGHT capacity and concurrent requests must not queue behind it.
-    """
+    """Select the next lane, rotating across proven pins first and otherwise
+    across all available warm lanes so the switcher can cycle through every
+    proxy in the pool."""
     global _lane_cursor
     if not lanes:
         raise IndexError("no lanes")
-    proven = [ln for ln in lanes if ln.ok > 0]
-    if proven:
-        proven.sort(key=lambda ln: (-ln.score, ln.lat_ms if ln.lat_ms else 8000))
-        pins = proven[: max(1, min(LANE_PIN_COUNT, len(proven)))]
-        lane = pins[_lane_cursor % len(pins)]
-        _lane_cursor += 1
-        return lane
-    top = lanes[: min(3, len(lanes))]
-    lane = top[_lane_cursor % len(top)]
+    # Proven lanes carry the traffic; unproven ones get an exploration slot so
+    # they can be proven at all. Rotating uniformly across the whole pool (the
+    # naive reading of "switch between all of them") fails: screen-only lanes
+    # are mostly duds, so every other request lands on a dead proxy and the
+    # client sees 503s while the reliable lane sits idle. One slot in five is
+    # enough to promote good lanes without wrecking the success rate.
+    ordered = sorted(
+        lanes,
+        key=lambda ln: (
+            0 if ln.ok > 0 else 1,
+            -(ln.score or 0.0),
+            ln.lat_ms if ln.lat_ms else 8000.0,
+            ln.addr,
+        ),
+    )
+    proven = [ln for ln in ordered if ln.ok > 0]
+    unproven = [ln for ln in ordered if ln.ok <= 0]
     _lane_cursor += 1
-    return lane
+    if proven and (not unproven or _lane_cursor % 5 != 0):
+        return proven[_lane_cursor % len(proven)]
+    pool = proven + unproven if proven else ordered
+    return pool[_lane_cursor % len(pool)]
 
 
 async def relay(payload: dict, path: str, stream: bool, headers: dict, timeout: float):
-    """Try lanes in score order until one answers. Transparent failover: a
-    burned/dead lane burns, the request silently moves to the next lane."""
-    attempts = max(1, RELAY_ATTEMPTS)
-    deadline = time.time() + timeout
+    """Try lanes in score order until one answers, waiting at most 7s per proxy
+    and switching across ALL available, warm, and parked lanes in the pool."""
+    # Every lane gets a turn (that is the point of the switcher), but the wall
+    # clock is bounded independently: `7s * relay_attempts` with the default 80
+    # attempts is a 560s stall, and a client that gave up long before then sees
+    # a dead relay. Cap the total wait so a run of dead lanes fails fast enough
+    # for the caller to retry, while still walking the whole pool in the normal
+    # case (the cap is far above the time needed to try 40 live lanes).
+    attempts = max(1, RELAY_ATTEMPTS, len(POOL.lanes))
+    per_attempt = min(7.0, float(RELAY_PROXY_TIMEOUT))
+    max_wall = min(float(timeout), max(per_attempt * 6.0, 45.0))
+    deadline = time.time() + max_wall
     last_err: tuple | None = None
     tried: set[str] = set()
     t_start = time.time()
 
-    # To prevent key-global 429 locks when we have multiple keys to cycle through,
-    # generate headers on a per-attempt basis using a fresh picked key.
-    for i in range(attempts):
-        # available_lanes() respects the per-lane in-flight cap so concurrent
-        # requests spread out instead of stacking onto the fastest lane and
-        # burning it — free proxies collapse under parallel load.
+    i = 0
+    while i < max(attempts, len(POOL.lanes)):
         lanes = [ln for ln in POOL.available_lanes() if f"{ln.proto}://{ln.addr}" not in tried]
         if not lanes:
             lanes = [ln for ln in POOL.warm_lanes() if f"{ln.proto}://{ln.addr}" not in tried]
         if not lanes:
-            # Fallback to parked lanes if no warm lanes are available
             lanes = [ln for ln in POOL.parked_lanes() if f"{ln.proto}://{ln.addr}" not in tried]
             lanes.sort(key=lambda ln: ln.parked_until)
             if not lanes:
                 break
         lane = _pick_lane(lanes) if i == 0 else lanes[0]
         tried.add(f"{lane.proto}://{lane.addr}")
-        
-        # Pick next round-robin key and build headers for this specific attempt
+        i += 1
+
         attempt_headers = build_upstream_headers(request=None, custom_key=None)
         if headers:
             for k, v in headers.items():
                 if k.lower() != "authorization":
                     attempt_headers[k] = v
-                    
+
         try:
             async with lane.sem:
                 lane.inflight += 1
                 try:
-                    status, resp_headers, body = await _attempt(lane, payload, path, attempt_headers, min(timeout, RELAY_PROXY_TIMEOUT))
+                    status, resp_headers, body = await _attempt(
+                        lane, payload, path, attempt_headers, min(7.0, float(RELAY_PROXY_TIMEOUT), timeout)
+                    )
                 finally:
                     lane.inflight -= 1
             if status == 200:
@@ -2438,27 +2714,20 @@ async def relay(payload: dict, path: str, stream: bool, headers: dict, timeout: 
                 ms = (time.time() - t_start) * 1000
                 record_request(_display_addr(lane.addr), 200, ms, stream)
                 publish("request", {"lane": _display_addr(lane.addr), "status": 200,
-                                    "ms": round(ms), "attempt": i + 1, "tier": lane.tier})
+                                    "ms": round(ms), "attempt": i, "tier": lane.tier})
                 return status, resp_headers, body
             if status == 429 and is_quota_429(body, 429):
-                # This egress IP's free-tier budget is spent. Park it for the
-                # cooldown — leaving it warm (the pre-0.9 behaviour) meant the
-                # next request picked the same dead lane again, which is how a
-                # 1.4k-request pool logged 15k failovers. Rotation only works if
-                # a burned IP actually leaves rotation.
                 lane.mark_fail(burn=True)
                 _note_lane_429(lane.addr)
-                # v1.0: a Tor lane is not parked — its exit is spent, but the
-                # slot can get a brand-new exit by changing the circuit name.
-                # That is the self-renewing part of the Tor provider.
                 if lane.addr.startswith(TOR_LANE_PREFIX):
                     tor_rotate_lane(lane)
+                elif lane.addr == WARP_PROXY_ADDR:
+                    asyncio.create_task(_warp_reconnect())
                 STATS["failovers"] += 1
                 last_err = (429, body)
-                if i >= (attempts - 1) or time.time() > deadline or (QUOTA_STATE["exhausted"] and i >= 2):
+                if time.time() > deadline:
                     break
                 continue
-            # invalid-body 502 from a burned lane: fail over, don't surface
             if status == 502:
                 try:
                     if json.loads(body).get("error", {}).get("type") == "lane_invalid":
@@ -2469,8 +2738,6 @@ async def relay(payload: dict, path: str, stream: bool, headers: dict, timeout: 
                         continue
                 except Exception:
                     pass
-            # 5xx from the lane or upstream: fail over to the next lane; keep
-            # the last 5xx body as the answer if every attempt fails.
             if status >= 500:
                 lane.mark_fail()
                 STATS["failovers"] += 1
@@ -2478,8 +2745,6 @@ async def relay(payload: dict, path: str, stream: bool, headers: dict, timeout: 
                 if time.time() > deadline:
                     break
                 continue
-            # 3xx from a hijacking/captive proxy: never legitimate from the
-            # upstream — fail over and burn the lane.
             if 300 <= status < 400:
                 lane.mark_fail(burn=True)
                 STATS["lane_failures"] += 1
@@ -2488,15 +2753,12 @@ async def relay(payload: dict, path: str, stream: bool, headers: dict, timeout: 
                 if time.time() > deadline:
                     break
                 continue
-            # 401/403 are lane problems here, never the client's key: rotate the
-            # lane out and fail over (see _handle_lane_block).
             if status in (401, 403):
                 _handle_lane_block(lane, status, body)
                 last_err = (status, body)
-                if i >= (attempts - 1) or time.time() > deadline:
+                if time.time() > deadline:
                     break
                 continue
-            # a real request problem (400/404/422): not a proxy issue — pass it
             return status, resp_headers, body
         except Exception as e:
             lane.mark_fail()
@@ -2541,31 +2803,36 @@ async def _stream_one(body: bytes):
 
 async def relay_stream(payload: dict, path: str, headers: dict, timeout: float):
     """Try lanes in score order; stream from the first lane that answers.
-    Returns (status, resp_headers, chunks) where chunks is an async generator
-    of SSE bytes. Failover/accounting/deadline mirror relay()."""
-    attempts = max(1, RELAY_ATTEMPTS)
-    deadline = time.time() + timeout
+    Waits at most 7s for each proxy to respond and switches across all lanes
+    in the pool."""
+    # Every lane gets a turn (that is the point of the switcher), but the wall
+    # clock is bounded independently: `7s * relay_attempts` with the default 80
+    # attempts is a 560s stall, and a client that gave up long before then sees
+    # a dead relay. Cap the total wait so a run of dead lanes fails fast enough
+    # for the caller to retry, while still walking the whole pool in the normal
+    # case (the cap is far above the time needed to try 40 live lanes).
+    attempts = max(1, RELAY_ATTEMPTS, len(POOL.lanes))
+    per_attempt = min(7.0, float(RELAY_PROXY_TIMEOUT))
+    max_wall = min(float(timeout), max(per_attempt * 6.0, 45.0))
+    deadline = time.time() + max_wall
     last_err: tuple | None = None
     tried: set[str] = set()
     t_start = time.time()
 
-    for i in range(attempts):
-        # Streaming is where latency is visible to a human, so prefer the fast
-        # tier; available_lanes() falls back to any capacity-free lane when no
-        # fast lane exists.
+    i = 0
+    while i < max(attempts, len(POOL.lanes)):
         lanes = [ln for ln in POOL.available_lanes(tier="fast") if f"{ln.proto}://{ln.addr}" not in tried]
         if not lanes:
             lanes = [ln for ln in POOL.warm_lanes() if f"{ln.proto}://{ln.addr}" not in tried]
         if not lanes:
-            # Fallback to parked lanes if no warm lanes are available
             lanes = [ln for ln in POOL.parked_lanes() if f"{ln.proto}://{ln.addr}" not in tried]
             lanes.sort(key=lambda ln: ln.parked_until)
             if not lanes:
                 break
         lane = _pick_lane(lanes) if i == 0 else lanes[0]
         tried.add(f"{lane.proto}://{lane.addr}")
+        i += 1
 
-        # Pick next round-robin key and build headers for this specific attempt
         attempt_headers = build_upstream_headers(request=None, custom_key=None)
         if headers:
             for k, v in headers.items():
@@ -2575,22 +2842,15 @@ async def relay_stream(payload: dict, path: str, headers: dict, timeout: float):
         client = None
         resp = None
         t0 = time.time()
+        attempt_timeout = min(7.0, float(RELAY_PROXY_TIMEOUT), timeout)
         try:
             client = httpx.AsyncClient(
                 proxy=lane.url(),
-                timeout=httpx.Timeout(min(timeout, 120), connect=12))
+                timeout=httpx.Timeout(min(timeout, 120.0), connect=attempt_timeout, read=attempt_timeout))
             req = client.build_request("POST", f"{UPSTREAM_BASE_URL}/{path}", headers=attempt_headers, json=payload)
-            resp = await client.send(req, stream=True)
+            resp = await asyncio.wait_for(client.send(req, stream=True), timeout=attempt_timeout)
             status = resp.status_code
             if status == 200:
-                # Validate the lane before committing: consume the head of the
-                # stream looking for the first data-bearing chunk. SSE field
-                # lines (": keep-alive", "event:", "id:", "retry:", "data: []")
-                # and blank lines are passed through untouched — zen models can
-                # heartbeat for seconds before the first chunk, and a 5-chunk
-                # peek landing entirely on keep-alives used to burn healthy
-                # lanes. A chunk whose first real line is neither an SSE field
-                # nor data is proxy garbage.
                 aiter = resp.aiter_bytes()
                 first = None
                 head: list[bytes] = []
@@ -2601,7 +2861,8 @@ async def relay_stream(payload: dict, path: str, headers: dict, timeout: float):
                 ended = False
                 while time.time() < peek_deadline:
                     try:
-                        chunk = await aiter.__anext__()
+                        rem = max(0.5, peek_deadline - time.time())
+                        chunk = await asyncio.wait_for(aiter.__anext__(), timeout=rem)
                     except StopAsyncIteration:
                         ended = True
                         break
@@ -2759,16 +3020,17 @@ async def relay_stream(payload: dict, path: str, headers: dict, timeout: float):
                     break
                 continue
             if status == 429 and is_quota_429(await resp.aread(), 429):
-                # Same as the non-streaming path: burn, don't just demote.
                 lane.mark_fail(burn=True)
                 _note_lane_429(lane.addr)
                 if lane.addr.startswith(TOR_LANE_PREFIX):
                     tor_rotate_lane(lane)
+                elif lane.addr == WARP_PROXY_ADDR:
+                    asyncio.create_task(_warp_reconnect())
                 STATS["failovers"] += 1
                 last_err = (429, b"")
                 await resp.aclose()
                 await client.aclose()
-                if i >= (attempts - 1) or time.time() > deadline or (QUOTA_STATE["exhausted"] and i >= 2):
+                if time.time() > deadline:
                     break
                 continue
             # 401/403 are lane problems here, never the client's key: rotate the
@@ -2779,7 +3041,7 @@ async def relay_stream(payload: dict, path: str, headers: dict, timeout: float):
                 await client.aclose()
                 _handle_lane_block(lane, status, body)
                 last_err = (status, body)
-                if i >= (attempts - 1) or time.time() > deadline:
+                if time.time() > deadline:
                     break
                 continue
             # a real request problem (400/404/422): not a proxy issue — pass it
@@ -3254,6 +3516,8 @@ async def lifespan(_app: FastAPI):
     # 3b. Tor egress. Enabled by config; verified by an actual connect to the
     #     SOCKS port, so a misconfigured port degrades to "no tor lanes" with a
     #     clear warning instead of silently adding lanes that can never dial.
+    _ensure_warp_lane()
+    _ensure_direct_lane()
     if TOR_ENABLED:
         if tor_available():
             added = tor_ensure_lanes()

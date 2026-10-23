@@ -906,6 +906,10 @@ impl AppState {
             distinct.len()
         };
         if distinct_count >= QUOTA_LANE_THRESHOLD {
+            if self.next_key(&self.rt()) == "public" {
+                q.window.clear();
+                return;
+            }
             if recent_ok {
                 return;
             }
@@ -929,38 +933,50 @@ impl AppState {
         if keys.is_empty() {
             return None;
         }
-        let pin_count = self.rt().pin_count;
         let pool = self.pool.lock().unwrap();
-        let proven: Vec<&String> = keys
+        // Proven lanes lead, but the cursor walks the whole pool. Restricting
+        // the rotation to proven pins starves every unproven lane: it never
+        // carries traffic, so it is never proven, and the pool collapses to
+        // whichever lane won the first race.
+        let mut ranked: Vec<&String> = keys.iter().collect();
+        ranked.sort_by(|a, b| {
+            let la = pool.lanes.get(*a);
+            let lb = pool.lanes.get(*b);
+            let pa = la.map(|l| (l.ok > 0) as u8).unwrap_or(0);
+            let pb = lb.map(|l| (l.ok > 0) as u8).unwrap_or(0);
+            pb.cmp(&pa)
+                .then_with(|| {
+                    let sa = la.map(|l| l.score).unwrap_or(0.0);
+                    let sb = lb.map(|l| l.score).unwrap_or(0.0);
+                    sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| {
+                    let ma = la.map(|l| if l.lat_ms > 0.0 { l.lat_ms } else { 8000.0 }).unwrap_or(8000.0);
+                    let mb = lb.map(|l| if l.lat_ms > 0.0 { l.lat_ms } else { 8000.0 }).unwrap_or(8000.0);
+                    ma.partial_cmp(&mb).unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| a.cmp(b))
+        });
+        let i = self.cursor.fetch_add(1, Ordering::Relaxed) as usize;
+        // Proven lanes carry the traffic; unproven ones get one slot in five so
+        // they can be proven at all. Uniform rotation over the whole pool would
+        // send most requests to unproven duds and the client would see errors
+        // while a reliable lane sat idle.
+        let proven: Vec<&String> = ranked
             .iter()
-            .filter(|k| pool.lanes.get(*k).map(|ln| ln.ok > 0).unwrap_or(false))
+            .copied()
+            .filter(|k| pool.lanes.get(*k).map(|l| l.ok > 0).unwrap_or(false))
             .collect();
-        let has_proven = !proven.is_empty();
-        let mut ranked: Vec<&String> = if has_proven {
-            proven
-        } else {
-            keys.iter().take(3).collect()
-        };
-        if ranked.is_empty() {
-            ranked = keys.iter().collect();
+        let unproven: Vec<&String> = ranked
+            .iter()
+            .copied()
+            .filter(|k| !pool.lanes.get(*k).map(|l| l.ok > 0).unwrap_or(false))
+            .collect();
+        if !proven.is_empty() && (unproven.is_empty() || i % 5 != 0) {
+            return Some(proven[i % proven.len()].clone());
         }
-        if has_proven {
-            ranked.sort_by(|a, b| {
-                let la = pool.lanes.get(*a).unwrap();
-                let lb = pool.lanes.get(*b).unwrap();
-                lb.score
-                    .partial_cmp(&la.score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then(
-                        (if la.lat_ms > 0.0 { la.lat_ms } else { 8000.0 })
-                            .partial_cmp(&(if lb.lat_ms > 0.0 { lb.lat_ms } else { 8000.0 }))
-                            .unwrap_or(std::cmp::Ordering::Equal),
-                    )
-            });
-            ranked.truncate(pin_count.max(1));
-        }
-        let i = self.cursor.fetch_add(1, Ordering::Relaxed);
-        Some(ranked[i % ranked.len()].clone())
+        let list: &Vec<&String> = &ranked;
+        Some(list[i % list.len()].clone())
     }
 
     /// Per-lane HTTP client, built once per lane (proxy, TLS verified).
@@ -974,11 +990,8 @@ impl AppState {
             let proxy = ln.proxy_url();
             let mut b = reqwest::Client::builder()
                 .no_proxy()
-                .read_timeout(Duration::from_secs(120))
-                // A dead/black-holed proxy must be abandoned fast, not after
-                // 12s: eight attempts at 12s is ~96s of a client waiting.
-                // Good proxies connect well under a second.
-                .connect_timeout(Duration::from_secs(1));
+                .read_timeout(Duration::from_secs(7))
+                .connect_timeout(Duration::from_secs(7));
             if let Some(p) = &proxy {
                 b = b.proxy(reqwest::Proxy::all(p).map_err(|e| e.to_string())?);
             }

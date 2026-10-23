@@ -65,6 +65,18 @@ pub const TEXT_SOURCES: &[(&str, &str)] = &[
     ("https://raw.githubusercontent.com/Anonym0usWork1221/Free-Proxies/main/proxy_files/http_proxies.txt", "http"),
     ("https://raw.githubusercontent.com/Anonym0usWork1221/Free-Proxies/main/proxy_files/socks4_proxies.txt", "socks4"),
     ("https://raw.githubusercontent.com/Anonym0usWork1221/Free-Proxies/main/proxy_files/socks5_proxies.txt", "socks5"),
+    ("https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=socks5&proxy_format=ipport&format=text&timeout=7000", "socks5"),
+    ("https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=socks4&proxy_format=ipport&format=text&timeout=7000", "socks4"),
+    ("https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/https.txt", "https"),
+    ("https://raw.githubusercontent.com/r00tee/Proxy-List/main/Socks5.txt", "socks5"),
+    ("https://raw.githubusercontent.com/r00tee/Proxy-List/main/Socks4.txt", "socks4"),
+    ("https://raw.githubusercontent.com/r00tee/Proxy-List/main/Https.txt", "https"),
+    ("https://raw.githubusercontent.com/tuanminpay/live-proxy/master/socks5.txt", "socks5"),
+    ("https://raw.githubusercontent.com/tuanminpay/live-proxy/master/socks4.txt", "socks4"),
+    ("https://raw.githubusercontent.com/tuanminpay/live-proxy/master/http.txt", "http"),
+    ("https://raw.githubusercontent.com/elliottophellia/yakumo/master/results/socks5/global/socks5_checked.txt", "socks5"),
+    ("https://raw.githubusercontent.com/elliottophellia/yakumo/master/results/socks4/global/socks4_checked.txt", "socks4"),
+    ("https://raw.githubusercontent.com/elliottophellia/yakumo/master/results/http/global/http_checked.txt", "http"),
 ];
 
 pub const GEONODE: &str = "https://proxylist.geonode.com/api/proxy-list?limit=500&page=1&sort_by=lastChecked&sort_type=desc&protocols=http%2Chttps%2Csocks4%2Csocks5";
@@ -94,6 +106,7 @@ fn intake(
     proto: &str,
     addr: &str,
     priority: bool,
+    seen_ips: &mut HashSet<String>,
 ) -> (bool, bool) {
     let addr = addr.trim().trim_end_matches('/').to_string();
     let key = format!("{proto}://{addr}");
@@ -101,6 +114,10 @@ fn intake(
         return (false, false);
     }
     if pool.contains_key(&key) || pool.tried.contains_key(&key) {
+        return (false, false);
+    }
+    let ip = crate::state::ip_of(&addr);
+    if !priority && !ip.is_empty() && !seen_ips.insert(ip) {
         return (false, false);
     }
     if st.is_burned(&addr) {
@@ -271,6 +288,14 @@ pub async fn fetch_sources(st: &AppState) {
     let mut blocked = 0u64;
     {
         let mut pool = st.pool.lock().unwrap();
+        let mut seen_ips: HashSet<String> = pool
+            .lanes
+            .keys()
+            .chain(pool.candidates.iter())
+            .chain(pool.priority.iter())
+            .filter_map(|k| k.split_once("://").map(|(_, a)| crate::state::ip_of(a)))
+            .filter(|ip| !ip.is_empty())
+            .collect();
         let source_lines: Vec<(&str, Vec<&str>)> = texts
             .iter()
             .map(|(kind, text)| {
@@ -302,7 +327,7 @@ pub async fn fetch_sources(st: &AppState) {
                         addr = a.to_string();
                     }
                     let Some(np) = norm_proto(&proto, rt.allow_socks) else { continue };
-                    let (a, b) = intake(st, &mut pool, &rt, &np, &addr, false);
+                    let (a, b) = intake(st, &mut pool, &rt, &np, &addr, false, &mut seen_ips);
                     if a {
                         added += 1;
                     }
@@ -316,7 +341,7 @@ pub async fn fetch_sources(st: &AppState) {
             }
         }
         for (proto, addr) in &geonode_entries {
-            let (a, b) = intake(st, &mut pool, &rt, proto, addr, false);
+            let (a, b) = intake(st, &mut pool, &rt, proto, addr, false, &mut seen_ips);
             if a {
                 added += 1;
             }
@@ -328,7 +353,7 @@ pub async fn fetch_sources(st: &AppState) {
             }
         }
         for addr in &webshare_entries {
-            let (a, b) = intake(st, &mut pool, &rt, "http", addr, true);
+            let (a, b) = intake(st, &mut pool, &rt, "http", addr, true, &mut seen_ips);
             if a {
                 added += 1;
             }
@@ -350,17 +375,12 @@ pub async fn fetch_sources(st: &AppState) {
 
 // ── probing ────────────────────────────────────────────────────────
 fn agent_probe_payload(model: &str) -> Value {
-    let mut system = String::from("You are a coding assistant. ");
-    for _ in 0..200 {
-        system.push_str("context ");
-    }
     json!({
         "model": model,
         "messages": [
-            {"role": "system", "content": system},
+            {"role": "system", "content": crate::relay::OPENCODE_SYS_PREFIX},
             {"role": "user", "content": "Reply exactly: OK"},
         ],
-        "max_completion_tokens": 4,
         "stream": true,
         "tools": [
             {"type": "function", "function": {
@@ -389,10 +409,12 @@ fn proxy_scheme(proto: &str) -> &'static str {
 
 async fn screen(proxy_url: &str, rt: &Runtime) -> bool {
     let Ok(proxy) = reqwest::Proxy::all(proxy_url) else { return false };
+    let t_sec = rt.probe_timeout.min(7).max(1);
     let Ok(c) = reqwest::Client::builder()
         .no_proxy()
         .proxy(proxy)
-        .timeout(Duration::from_secs(4))
+        .connect_timeout(Duration::from_secs(t_sec))
+        .timeout(Duration::from_secs(t_sec))
         .build()
     else {
         return false;
@@ -420,10 +442,12 @@ async fn stage2(
     let Ok(proxy) = reqwest::Proxy::all(&proxy_url) else {
         return Err("proxy");
     };
+    let t_sec = rt.probe_timeout.min(7).max(1);
     let Ok(client) = reqwest::Client::builder()
         .no_proxy()
         .proxy(proxy)
-        .timeout(Duration::from_secs(rt.probe_timeout))
+        .connect_timeout(Duration::from_secs(t_sec))
+        .timeout(Duration::from_secs(t_sec))
         .build()
     else {
         return Err("proxy");
@@ -453,14 +477,33 @@ pub async fn probe_candidate(st: &AppState, key: &str) -> Option<Lane> {
             .insert(key.to_string(), "burned-known".into());
         return None;
     }
-    let proxy_url = format!("{}://{addr}", proxy_scheme(proto));
-    if !screen(&proxy_url, &rt).await {
+    // Public list files mislabel protocols constantly (http.txt routinely
+    // carries SOCKS5 servers). Trying only the declared protocol discards
+    // every mislabeled-but-working proxy, so try the declared one first and
+    // fall back to the others before giving up on the candidate.
+    let declared = proxy_scheme(proto);
+    let mut order: Vec<&'static str> = vec![declared];
+    for alt in ["http", "socks5"] {
+        if !order.contains(&alt) {
+            order.push(alt);
+        }
+    }
+    let mut working: Option<&'static str> = None;
+    for scheme in order {
+        let proxy_url = format!("{scheme}://{addr}");
+        if screen(&proxy_url, &rt).await {
+            working = Some(scheme);
+            break;
+        }
+    }
+    let Some(scheme) = working else {
         st.probe_err
             .lock()
             .unwrap()
             .insert(key.to_string(), "proxy".into());
         return None;
-    }
+    };
+    let proto = scheme;
     if !rt.stage2_probe {
         // Screen-only promotion: the proxy can reach the upstream, but we do
         // not spend a completion to prove it. The provider's free tier allows
@@ -857,8 +900,8 @@ pub async fn revalidate_warm(st: &AppState) {
                     let Ok(c) = reqwest::Client::builder()
                         .no_proxy()
                         .proxy(proxy)
-                        .connect_timeout(Duration::from_secs(4))
-                        .timeout(Duration::from_secs(6))
+                        .connect_timeout(Duration::from_secs(7))
+                        .timeout(Duration::from_secs(7))
                         .build()
                     else {
                         return Err(());
@@ -991,13 +1034,55 @@ pub fn ensure_direct_lane(st: &AppState, rt: &Runtime) {
     }
 }
 
+pub fn ensure_warp_lane(st: &AppState) {
+    let addr = "127.0.0.1:40000";
+    let key = format!("http://{addr}");
+    if std::net::TcpStream::connect_timeout(
+        &"127.0.0.1:40000".parse().unwrap(),
+        Duration::from_millis(300),
+    )
+    .is_err()
+    {
+        return;
+    }
+    // WARP is the only egress measured to complete reliably while every free
+    // proxy 429'd or timed out, so it has to survive the churn: restore a lane
+    // that was parked or demoted instead of only registering it when absent.
+    // Registering once let a single transient failure evict the backbone for
+    // the whole cooldown and left the pool with no dependable member.
+    let mut pool = st.pool.lock().unwrap();
+    match pool.lanes.get_mut(&key) {
+        None => {
+            let mut ln = Lane::new(addr, "http");
+            ln.score = 0.95;
+            ln.lat_ms = 250.0;
+            ln.ok = 1;
+            pool.lanes.insert(key, ln);
+            logline("warp: local proxy lane enabled on 127.0.0.1:40000");
+        }
+        Some(ln) => {
+            if ln.parked_until >= now() || ln.ok == 0 {
+                ln.parked_until = 0.0;
+                ln.consec_fails = 0;
+                ln.ok = ln.ok.max(1);
+                ln.score = ln.score.max(0.9);
+                logline("warp: restored backbone lane on 127.0.0.1:40000");
+            }
+            if ln.lat_ms <= 0.0 {
+                ln.lat_ms = 250.0;
+            }
+            ln.score = ln.score.max(0.9);
+        }
+    }
+}
+
 pub async fn pool_manager(st: Arc<AppState>) {
     loop {
         {
-            // A retired probe model would stall every stage-2 probe and leave
-            // the pool permanently empty; this is a cached call (1h TTL).
             crate::models::ensure_probe_model(&st).await;
             let rt = st.rt();
+            ensure_warp_lane(&st);
+            ensure_direct_lane(&st, &rt);
             let warm = st.pool.lock().unwrap().warm_keys().len();
             let paused = st.quota_paused();
             if warm < rt.pool_target {
@@ -1018,7 +1103,6 @@ pub async fn pool_manager(st: Arc<AppState>) {
                     fetch_sources(&st).await;
                 }
             }
-            ensure_direct_lane(&st, &rt);
         }
         tokio::time::sleep(Duration::from_secs(6)).await;
     }

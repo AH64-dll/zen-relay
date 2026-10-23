@@ -376,6 +376,7 @@ pub fn looks_like_completion(body: &[u8]) -> bool {
     false
 }
 
+pub const OPENCODE_SYS_PREFIX: &str = "You are an AI agent running in OpenCode, a coding agent harness. Help the user accomplish their goals using the tools you have available.";
 pub const READ_TOOL_STUB: &str = r#"{"type":"function","function":{"name":"read","description":"Read the contents of a file.","parameters":{"type":"object","properties":{"path":{"type":"string"}}}}}"#;
 
 pub fn ensure_read_tool(payload: &mut Value) {
@@ -397,6 +398,144 @@ pub fn ensure_read_tool(payload: &mut Value) {
             obj.insert("tools".into(), Value::Array(vec![stub]));
         }
     }
+    if let Some(Value::Array(msgs)) = obj.get_mut("messages") {
+        let first_is_sys = msgs
+            .first()
+            .and_then(|m| m.get("role"))
+            .and_then(|r| r.as_str())
+            == Some("system");
+        if first_is_sys {
+            if let Some(m0) = msgs.first_mut().and_then(|m| m.as_object_mut()) {
+                if let Some(Value::String(s)) = m0.get_mut("content") {
+                    if !s.contains(OPENCODE_SYS_PREFIX) {
+                        if s.is_empty() {
+                            *s = OPENCODE_SYS_PREFIX.to_string();
+                        } else {
+                            *s = format!("{OPENCODE_SYS_PREFIX}\n\n{s}");
+                        }
+                    }
+                }
+            }
+        } else {
+            msgs.insert(0, json!({"role": "system", "content": OPENCODE_SYS_PREFIX}));
+        }
+    }
+}
+
+pub fn sse_to_chat_completion_json(body: &[u8], fallback_model: &str) -> Bytes {
+    if let Ok(v) = serde_json::from_slice::<Value>(body) {
+        if v.is_object() && (v.get("choices").is_some() || v.get("error").is_some()) {
+            return Bytes::copy_from_slice(body);
+        }
+    }
+    let mut cid = String::from("chatcmpl-relay");
+    let mut created = now() as u64;
+    let mut model = fallback_model.to_string();
+    let mut content = String::new();
+    let mut reasoning = String::new();
+    let mut finish_reason = String::from("stop");
+    let mut usage = json!({"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0});
+    let mut tool_calls: std::collections::BTreeMap<usize, (String, String, String)> =
+        std::collections::BTreeMap::new();
+
+    let text = String::from_utf8_lossy(body);
+    for line in text.lines() {
+        let s = line.trim();
+        let Some(rest) = s.strip_prefix("data:") else { continue };
+        let rest = rest.trim();
+        if rest.is_empty() || rest == "[DONE]" {
+            continue;
+        }
+        let Ok(chunk) = serde_json::from_str::<Value>(rest) else { continue };
+        if let Some(id_s) = chunk.get("id").and_then(|v| v.as_str()) {
+            if !id_s.is_empty() {
+                cid = id_s.to_string();
+            }
+        }
+        if let Some(cr) = chunk.get("created").and_then(|v| v.as_u64()) {
+            created = cr;
+        }
+        if let Some(m) = chunk.get("model").and_then(|v| v.as_str()) {
+            if !m.is_empty() {
+                model = m.to_string();
+            }
+        }
+        if let Some(u) = chunk.get("usage") {
+            if u.is_object() {
+                usage = u.clone();
+            }
+        }
+        let Some(ch0) = chunk
+            .get("choices")
+            .and_then(|c| c.as_array())
+            .and_then(|a| a.first())
+        else {
+            continue;
+        };
+        if let Some(fr) = ch0.get("finish_reason").and_then(|v| v.as_str()) {
+            if !fr.is_empty() {
+                finish_reason = fr.to_string();
+            }
+        }
+        let delta = ch0.get("delta").or_else(|| ch0.get("message"));
+        let Some(delta) = delta else { continue };
+        if let Some(c) = delta.get("content").and_then(|v| v.as_str()) {
+            content.push_str(c);
+        }
+        if let Some(rc) = delta.get("reasoning_content").and_then(|v| v.as_str()) {
+            reasoning.push_str(rc);
+        }
+        if let Some(tcs) = delta.get("tool_calls").and_then(|v| v.as_array()) {
+            for tc in tcs {
+                let idx = tc.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let entry = tool_calls
+                    .entry(idx)
+                    .or_insert_with(|| (format!("call_{idx}"), String::new(), String::new()));
+                if let Some(id_s) = tc.get("id").and_then(|v| v.as_str()) {
+                    if !id_s.is_empty() {
+                        entry.0 = id_s.to_string();
+                    }
+                }
+                if let Some(fn_obj) = tc.get("function") {
+                    if let Some(n) = fn_obj.get("name").and_then(|v| v.as_str()) {
+                        entry.1.push_str(n);
+                    }
+                    if let Some(a) = fn_obj.get("arguments").and_then(|v| v.as_str()) {
+                        entry.2.push_str(a);
+                    }
+                }
+            }
+        }
+    }
+    let mut msg = json!({
+        "role": "assistant",
+        "content": if !content.is_empty() || tool_calls.is_empty() { Value::String(content) } else { Value::Null },
+    });
+    if !reasoning.is_empty() {
+        msg["reasoning_content"] = Value::String(reasoning);
+    }
+    if !tool_calls.is_empty() {
+        let arr: Vec<Value> = tool_calls
+            .into_values()
+            .map(|(id, name, args)| {
+                json!({
+                    "id": id,
+                    "type": "function",
+                    "function": {"name": name, "arguments": args},
+                })
+            })
+            .collect();
+        msg["tool_calls"] = Value::Array(arr);
+    }
+    let out = json!({
+        "id": cid,
+        "object": "chat.completion",
+        "created": created,
+        "model": model,
+        "choices": [{"index": 0, "message": msg, "finish_reason": finish_reason}],
+        "usage": usage,
+    });
+    Bytes::from(out.to_string())
 }
 
 fn json_body(status: u16, v: &Value) -> (StatusCode, HeaderMap, Bytes) {
@@ -432,30 +571,44 @@ pub async fn attempt(
             .ok_or_else(|| "lane gone".to_string())?
             .proxy_url()
     };
-    // The connect budget must match the probe's patience (25 s) closely
-    // enough: a one-second connect timeout killed every slow proxy before it
-    // could tunnel the request, so lanes that had just passed the probe failed
-    // instantly on the real request.
+    let t_sec = timeout.min(7.0).max(1.0);
+    let want_stream = payload
+        .get("stream")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let mut up_payload = payload.clone();
+    if path == "chat/completions" {
+        if let Some(obj) = up_payload.as_object_mut() {
+            obj.insert("stream".into(), Value::Bool(true));
+        }
+    }
     let mut b = reqwest::Client::builder()
         .no_proxy()
-        .connect_timeout(Duration::from_secs_f64(timeout.min(15.0)))
-        .timeout(Duration::from_secs_f64(timeout));
+        .connect_timeout(Duration::from_secs_f64(t_sec))
+        .timeout(Duration::from_secs_f64(t_sec));
     if let Some(p) = &proxy {
         b = b.proxy(reqwest::Proxy::all(p).map_err(|e| e.to_string())?);
     }
     let client = b.build().map_err(|e| e.to_string())?;
     let url = format!("{}/{path}", rt.upstream_base);
     let t0 = Instant::now();
-    let resp = client
-        .post(&url)
-        .headers(headers.clone())
-        .json(payload)
-        .send()
-        .await
-        .map_err(|e| error_chain(&e))?;
+    let resp = tokio::time::timeout(
+        Duration::from_secs_f64(t_sec),
+        client
+            .post(&url)
+            .headers(headers.clone())
+            .json(&up_payload)
+            .send(),
+    )
+    .await
+    .map_err(|_| "proxy timeout (7s)".to_string())?
+    .map_err(|e| error_chain(&e))?;
     let status = resp.status().as_u16();
-    let resp_headers = resp.headers().clone();
-    let body = resp.bytes().await.map_err(|e| e.to_string())?;
+    let mut resp_headers = resp.headers().clone();
+    let mut body = tokio::time::timeout(Duration::from_secs_f64(t_sec), resp.bytes())
+        .await
+        .map_err(|_| "proxy read timeout (7s)".to_string())?
+        .map_err(|e| e.to_string())?;
     let lat = t0.elapsed().as_secs_f64() * 1000.0;
 
     if status == 200 {
@@ -481,6 +634,16 @@ pub async fn attempt(
         }
         if looks_like_completion(&body) {
             st.pool.lock().unwrap().mark_ok(key, lat);
+            if !want_stream && path == "chat/completions" {
+                let fallback_model = payload
+                    .get("model")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                body = sse_to_chat_completion_json(&body, fallback_model);
+                resp_headers.insert("content-type", HeaderValue::from_static("application/json"));
+                resp_headers.remove("content-length");
+                resp_headers.remove("transfer-encoding");
+            }
         } else {
             st.pool.lock().unwrap().mark_fail(key, true, rt);
             logline(&format!(
@@ -512,8 +675,15 @@ pub async fn relay_nonstream(
     timeout: f64,
 ) -> (StatusCode, HeaderMap, Bytes) {
     let rt = st.rt();
-    let attempts = rt.attempts.max(1);
-    let deadline = now() + timeout;
+    let attempts = (rt.attempts as usize)
+        .max(st.pool.lock().unwrap().lanes.len())
+        .max(1);
+    // Bounded wall clock, independent of the attempt count: 7s * 80 attempts
+    // is a 560s stall, long past any client's patience. The cap still lets a
+    // healthy pool be walked end to end, but a run of dead lanes fails fast.
+    let per_attempt = rt.relay_proxy_timeout.min(7) as f64;
+    let max_wall = timeout.min((per_attempt * 6.0).max(45.0));
+    let deadline = now() + max_wall;
     let mut last_err: Option<(i64, Bytes)> = None;
     let mut tried: std::collections::HashSet<String> = std::collections::HashSet::new();
     let t_start = now();
@@ -549,7 +719,7 @@ pub async fn relay_nonstream(
             &rt,
             client_headers.get("user-agent").and_then(|v| v.to_str().ok()),
         );
-        let attempt_timeout = timeout.min(rt.relay_proxy_timeout as f64);
+        let attempt_timeout = timeout.min(rt.relay_proxy_timeout as f64).min(7.0);
 
         // per-lane capacity gate (non-stream path only, like the Python relay)
         let sem: Option<Arc<Semaphore>> = {
@@ -598,8 +768,7 @@ pub async fn relay_nonstream(
                     }
                     st.stats.failovers.fetch_add(1, Ordering::Relaxed);
                     last_err = Some((429, a.body));
-                    let exhausted = st.quota.lock().unwrap().exhausted;
-                    if i >= attempts - 1 || now() > deadline || (exhausted && i >= 2) {
+                    if i >= attempts - 1 || now() > deadline {
                         break;
                     }
                     continue;
@@ -718,8 +887,15 @@ pub async fn relay_stream(
     timeout: f64,
 ) -> (StatusCode, HeaderMap, Bytes, Option<Body>) {
     let rt = st.rt();
-    let attempts = rt.attempts.max(1);
-    let deadline = now() + timeout;
+    let attempts = (rt.attempts as usize)
+        .max(st.pool.lock().unwrap().lanes.len())
+        .max(1);
+    // Bounded wall clock, independent of the attempt count: 7s * 80 attempts
+    // is a 560s stall, long past any client's patience. The cap still lets a
+    // healthy pool be walked end to end, but a run of dead lanes fails fast.
+    let per_attempt = rt.relay_proxy_timeout.min(7) as f64;
+    let max_wall = timeout.min((per_attempt * 6.0).max(45.0));
+    let deadline = now() + max_wall;
     let mut last_err: Option<(i64, Bytes)> = None;
     let mut tried: std::collections::HashSet<String> = std::collections::HashSet::new();
     let t_start = now();
@@ -775,13 +951,29 @@ pub async fn relay_stream(
 
         let url = format!("{}/{path}", rt.upstream_base);
         let t0 = Instant::now();
-        let resp = match client.post(&url).headers(h).json(&payload).send().await {
-            Ok(r) => r,
-            Err(e) => {
+        let attempt_timeout = timeout.min(rt.relay_proxy_timeout as f64).min(7.0);
+        let send_res = tokio::time::timeout(
+            Duration::from_secs_f64(attempt_timeout),
+            client.post(&url).headers(h).json(&payload).send(),
+        )
+        .await;
+        let resp = match send_res {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => {
                 st.pool.lock().unwrap().mark_fail(&key, false, &rt);
                 st.stats.lane_failures.fetch_add(1, Ordering::Relaxed);
                 st.stats.failovers.fetch_add(1, Ordering::Relaxed);
                 last_err = Some((-1, Bytes::from(e.to_string())));
+                if now() > deadline {
+                    break;
+                }
+                continue;
+            }
+            Err(_) => {
+                st.pool.lock().unwrap().mark_fail(&key, false, &rt);
+                st.stats.lane_failures.fetch_add(1, Ordering::Relaxed);
+                st.stats.failovers.fetch_add(1, Ordering::Relaxed);
+                last_err = Some((-1, Bytes::from_static(b"proxy timeout (7s)")));
                 if now() > deadline {
                     break;
                 }
@@ -1024,8 +1216,7 @@ pub async fn relay_stream(
             }
             st.stats.failovers.fetch_add(1, Ordering::Relaxed);
             last_err = Some((429, Bytes::new()));
-            let exhausted = st.quota.lock().unwrap().exhausted;
-            if i >= attempts - 1 || now() > deadline || (exhausted && i >= 2) {
+            if i >= attempts - 1 || now() > deadline {
                 break;
             }
             continue;
