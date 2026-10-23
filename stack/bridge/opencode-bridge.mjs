@@ -174,6 +174,8 @@ export class OpenCodeClient {
     this.texts = new Map();
     this.events = null;
     this.reconnecting = false;
+    /** @type {{at: number, map: Map<string, string>}|null} model id -> providerID */
+    this._providers = null;
   }
 
   /** @returns {string} */
@@ -274,14 +276,39 @@ export class OpenCodeClient {
 
   /**
    * Pin the model of a session.
+   *
+   * The provider must be the model's REAL provider: opencode addresses models
+   * as (providerID, id), and a model id is not unique across providers. Sending
+   * a hardcoded 'opencode' made every non-opencode model resolve as
+   * `opencode/auto/best-coding` and fail with "Model unavailable", which is why
+   * only the (quota-exhausted) free models ever worked.
    * @param {string} sessionID
    * @param {string} model
    */
   async setModel(sessionID, model) {
+    const providerID = await this.providerOf(model);
     await this.request(`/api/session/${sessionID}/model`, {
       method: 'POST',
-      body: { model: { id: model, providerID: 'opencode' } },
+      body: { model: { id: model, providerID } },
     });
+  }
+
+  /**
+   * Resolve the provider that owns `model`, from the live model list.
+   *
+   * Falls back to 'opencode' for an unknown id: that keeps the previous
+   * behaviour for the free-tier models, which are the ones DSH defaults to.
+   * @param {string} model
+   */
+  async providerOf(model) {
+    const cache = this._providers ?? (this._providers = { at: 0, map: new Map() });
+    if (Date.now() - cache.at > 60_000) {
+      cache.map.clear();
+      for (const m of await this.listModels()) cache.map.set(m.id, m.providerID);
+      cache.at = Date.now();
+    }
+    const hit = cache.map.get(model);
+    return typeof hit === 'string' && hit.length > 0 ? hit : 'opencode';
   }
 
   /**
