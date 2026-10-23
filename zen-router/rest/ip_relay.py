@@ -944,12 +944,22 @@ class Lane:
         self.consec_fails = 0
 
     def mark_fail(self, burn: bool = False):
+        # The local WARP proxy is the one egress measured to complete reliably
+        # (6/6 under load while every free proxy 429'd or timed out). It cannot
+        # be replaced from the free lists, so a transient failure must never
+        # park it: enforce that here, at the single choke point, instead of
+        # trusting every caller to remember.
+        is_backbone = self.addr == "127.0.0.1:40000"
+        if is_backbone:
+            burn = False
         self.fails += 1
         self.consec_fails += 1
-        self.score = max(0.0, self.score * 0.4)         # punish
+        # The backbone keeps a floor: it is still the best egress available, and
+        # a decaying score would silently stop selecting it.
+        self.score = max(0.6 if is_backbone else 0.0, self.score * 0.4)
         # Explicit burn OR repeated drops/5xx without 429s (upstream never
         # sends 429) — self-park so broken IPs leave rotation.
-        if burn or self.consec_fails >= 3:
+        if (burn or self.consec_fails >= 3) and not is_backbone:
             was_warm = self.parked_until < time.time()
             self.parked_until = time.time() + LANE_COOLDOWN_SEC
             if was_warm:
@@ -2307,8 +2317,13 @@ def _handle_lane_block(lane: Lane, status: int, body: bytes) -> None:
     reliably completes, kept getting permanently evicted."""
     kind = _block_class(status, body)
     if kind == "proxy":
-        lane.mark_fail(burn=True)
-        mark_burned(lane.addr, f"relay-{status}-{kind}")
+        # Never burn the WARP backbone: it is the one egress that reliably
+        # completes, and a proxy that merely mangles one response is still the
+        # best member of the pool.
+        burn = lane.addr != WARP_PROXY_ADDR
+        lane.mark_fail(burn=burn)
+        if burn:
+            mark_burned(lane.addr, f"relay-{status}-{kind}")
     else:
         lane.mark_fail(burn=False)
     STATS["lane_failures"] += 1
@@ -2365,7 +2380,14 @@ def _stream_frame_kind(chunk: bytes) -> str:
             if not t or t == b"[DONE]":
                 continue
         if not t.startswith(b"{"):
-            saw_garbage = True
+            # Not a JSON frame start. TCP splits SSE frames anywhere, so this
+            # is usually the middle of a `data: {...}` line cut in half
+            # (measured: a WARP chunk beginning `ea-a330-4bae-...`). Treating
+            # that as garbage burned the only reliable lane. Only real proxy
+            # junk — HTML, or text with no SSE/JSON structure at all — counts.
+            low = t.lower()
+            if low.startswith((b"<", b"<!doctype", b"<html")) or b"<html" in low:
+                saw_garbage = True
             continue
         try:
             d = json.loads(t)
@@ -2690,7 +2712,20 @@ async def relay(payload: dict, path: str, stream: bool, headers: dict, timeout: 
             lanes.sort(key=lambda ln: ln.parked_until)
             if not lanes:
                 break
-        lane = _pick_lane(lanes) if i == 0 else lanes[0]
+        if i == 0:
+            lane = _pick_lane(lanes)
+        else:
+            # Deterministic fallback order: the backbone first, then the rest by
+            # score. Iterating whatever order the pool happened to yield meant a
+            # run of dead proxies could consume the whole wall-clock budget
+            # before the one working lane was ever tried.
+            lanes.sort(key=lambda ln: (
+                0 if ln.addr == WARP_PROXY_ADDR else 1,
+                -(ln.score or 0.0),
+                ln.lat_ms if ln.lat_ms else 8000.0,
+                ln.addr,
+            ))
+            lane = lanes[0]
         tried.add(f"{lane.proto}://{lane.addr}")
         i += 1
 
@@ -2829,7 +2864,20 @@ async def relay_stream(payload: dict, path: str, headers: dict, timeout: float):
             lanes.sort(key=lambda ln: ln.parked_until)
             if not lanes:
                 break
-        lane = _pick_lane(lanes) if i == 0 else lanes[0]
+        if i == 0:
+            lane = _pick_lane(lanes)
+        else:
+            # Deterministic fallback order: the backbone first, then the rest by
+            # score. Iterating whatever order the pool happened to yield meant a
+            # run of dead proxies could consume the whole wall-clock budget
+            # before the one working lane was ever tried.
+            lanes.sort(key=lambda ln: (
+                0 if ln.addr == WARP_PROXY_ADDR else 1,
+                -(ln.score or 0.0),
+                ln.lat_ms if ln.lat_ms else 8000.0,
+                ln.addr,
+            ))
+            lane = lanes[0]
         tried.add(f"{lane.proto}://{lane.addr}")
         i += 1
 
@@ -2846,7 +2894,14 @@ async def relay_stream(payload: dict, path: str, headers: dict, timeout: float):
         try:
             client = httpx.AsyncClient(
                 proxy=lane.url(),
-                timeout=httpx.Timeout(min(timeout, 120.0), connect=attempt_timeout, read=attempt_timeout))
+                # connect/response is bounded at 7s, but `read` must NOT be:
+                # httpx applies the read timeout to every inter-chunk gap, so a
+                # 7s read bound kills a stream that is merely thinking between
+                # tokens (a long reasoning block), and the client sees a dead
+                # turn. Slow lanes are handled by the peek window below, which
+                # fails over before any bytes reach the client.
+                timeout=httpx.Timeout(min(timeout, 120.0), connect=attempt_timeout,
+                                      read=min(timeout, 120.0)))
             req = client.build_request("POST", f"{UPSTREAM_BASE_URL}/{path}", headers=attempt_headers, json=payload)
             resp = await asyncio.wait_for(client.send(req, stream=True), timeout=attempt_timeout)
             status = resp.status_code
