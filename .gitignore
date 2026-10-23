@@ -17,3 +17,9 @@ stack/*.log
 **/target/
 **/.venv/
 **/__pycache__/
+
+# REST relay runtime state (holds proxy creds)
+zen-router/rest/lanes.json
+zen-router/rest/burned.json
+zen-router/rest/settings.json
+zen-router/rest/*.tmp

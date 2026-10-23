@@ -87,7 +87,8 @@ async def main():
             f"round {res['round']:>2}: {res['ok']}/{res['n']} ok ({res['pct']}%) "
             f"avg={res['avg_s']}s max={res['max_s']}s errors={res['errors']}"
         )
-        await asyncio.sleep(ROUND_WAIT_SEC)
+        if rnd < ROUNDS:
+            await asyncio.sleep(ROUND_WAIT_SEC)
 
     total = totals["ok"] + totals["fail"]
     print(f"\n=== TOTAL: {totals['ok']}/{total} ok ({round(100*totals['ok']/total,1)}%) ===")
@@ -96,7 +97,7 @@ async def main():
     # pool state after
     try:
         async with httpx.AsyncClient() as c:
-            h = (await c.get("http://127.0.0.1:18080/healthz")).json()
+            h = (await c.get(f"{BASE_URL}/healthz")).json()
         print(f"pool after: {h['pool']} | stats: {h['stats']}")
     except Exception:
         pass
