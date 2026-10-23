@@ -84,8 +84,15 @@ DEFAULTS = {
     "webshare_token": "",             # optional Webshare free-tier API token
     "sources_enabled": True,          # pull public proxy lists (off = own lanes only)
     "allow_socks": True,              # use SOCKS4/5 sources (needs httpx[socks])
-    "stage2_probe": True,             # prove candidates with a real 1-token completion;
-                                      # false = screen-only, matches the Rust relay's fast path
+    "stage2_probe": False,            # prove candidates with a real completion.
+                                      # Keep this OFF: the destination allows one
+                                      # completion per egress IP, so a stage-2 probe
+                                      # spends the allowance the lane exists to serve
+                                      # and the first real request arrives at a spent
+                                      # IP. Measured: with it on the pool stays at ~1
+                                      # lane, with it off it fills to the target.
+                                      # Candidates are promoted after the reachability
+                                      # screen and proven by their first success.
     # v0.8: capacity + safety
     "lane_max_inflight": 2,           # concurrent requests allowed per lane
     "max_lanes_per_subnet": 3,        # /24 diversity cap (0 = unlimited)
