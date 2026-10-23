@@ -1154,12 +1154,17 @@ def _note_lane_429(addr: str, retry_after: float | None = None) -> None:
     # than the normal cooldown, never longer than the burn memory itself.
     if retry_after:
         park = min(max(float(retry_after), float(LANE_COOLDOWN_SEC)), float(BURN_TTL_SEC))
-        for key, ln in list(POOL.lanes.items()):
-            if ln.addr == addr:
-                ln.parked_until = max(ln.parked_until, now + park)
-                log.info("lane %s parked for %ds (upstream Retry-After)",
-                         _display_addr(addr), int(park))
-                break
+        # The WARP backbone is exempt, same as mark_fail: `_warp_reconnect`
+        # rotates its IPv6 prefix on a 429, which is the response that scale
+        # can afford; parking it for hours would leave the relay with no
+        # egress whenever one reconnect fails.
+        if addr != WARP_PROXY_ADDR:
+            for key, ln in list(POOL.lanes.items()):
+                if ln.addr == addr:
+                    ln.parked_until = max(ln.parked_until, now + park)
+                    log.info("lane %s parked for %ds (upstream Retry-After)",
+                             _display_addr(addr), int(park))
+                    break
     w = QUOTA_STATE["_429_window"]
     w.append((now, addr))
     w[:] = [(t, a) for t, a in w if now - t <= QUOTA_WINDOW_SEC]
